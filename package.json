@@ -26,7 +26,7 @@
   "license": "MIT",
   "repository": "git@github.com:Sovea/electron-ipc-service.git",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=16.0.0"
   },
   "dependencies": {
     "nanoid": "^5.1.5"
@@ -39,6 +39,6 @@
     "typescript": "^5.9.2"
   },
   "peerDependencies": {
-    "electron": "^30"
+    "electron": "^22"
   }
 }
