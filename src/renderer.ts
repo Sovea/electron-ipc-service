@@ -1,7 +1,7 @@
 export {
-  IpcRendererService,
   create,
   createForInterRenderers,
+  IpcRendererService,
 } from './core/renderer';
 
 export type {

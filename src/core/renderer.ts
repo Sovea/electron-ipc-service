@@ -1,17 +1,25 @@
-import { ipcRenderer, type IpcRendererEvent } from 'electron';
+import { type IpcRendererEvent, ipcRenderer } from 'electron';
 import type { RequireAtLeastOne } from 'type-fest';
-import { BaseIpcService } from './base';
-import { processFunction } from '../utils/fn';
 import { IpcChannelType } from '../constants';
 import type { Fn, Optional, RequestOptions, Unsubscribe } from '../types';
 import type {
   APIBetweenRenderers,
-  IpcHandles,
+  InterRendererIpcRendererService,
+  IpcRendererConnectionEvent,
+  IpcRendererConnectionListener,
+  IpcRendererConnectionOptions,
   IpcRendererId,
+  IpcRendererMessagePort,
   IpcRendererServiceListener,
-  IpcRequests,
   MultiRenderersSchema,
 } from '../types/renderer';
+import { processFunction } from '../utils/fn';
+import { BaseIpcService } from './base';
+
+type MessagePortPayload = IpcRendererConnectionEvent & {
+  requestId: string;
+  source: boolean;
+};
 
 /**
  * ipc renderer service
@@ -26,6 +34,47 @@ export class IpcRendererService<
   M extends Record<string, Fn<any, any>> = any,
   Q extends Fn<any, number | undefined> = any,
 > extends BaseIpcService {
+  private connectionListeners = new Map<
+    string,
+    Set<IpcRendererConnectionListener>
+  >();
+
+  constructor(options?: ConstructorParameters<typeof BaseIpcService>[0]) {
+    super(options);
+    this.initMessagePortListener();
+  }
+
+  private initMessagePortListener() {
+    ipcRenderer.on(
+      this.wrapChannel(`${IpcChannelType.Internal}:message-port`),
+      (event: IpcRendererEvent, payload: MessagePortPayload) => {
+        const [port] = event.ports;
+        if (!port) {
+          return;
+        }
+
+        port.start();
+        if (payload.source) {
+          this.resolvePendingRequest(payload.requestId, port);
+          return;
+        }
+
+        const listeners = this.connectionListeners.get(payload.channel);
+        if (!listeners?.size) {
+          port.close();
+          return;
+        }
+
+        const connectionEvent: IpcRendererConnectionEvent = {
+          channel: payload.channel,
+          sourceWebContentsId: payload.sourceWebContentsId,
+          targetWebContentsId: payload.targetWebContentsId,
+        };
+        listeners.forEach((listener) => listener(connectionEvent, port));
+      },
+    );
+  }
+
   /**
    * wrap ipc service listener
    * @param listener
@@ -147,6 +196,58 @@ export class IpcRendererService<
     );
   }
 
+  connectTo(
+    channel: string,
+    options: IpcRendererConnectionOptions &
+      RequireAtLeastOne<{
+        webContentsId?: number;
+        windowParams?: Parameters<Q>;
+      }>,
+  ): Promise<IpcRendererMessagePort> {
+    const requestId = this.generateId();
+    const { timeout = this.options.pendingRequestTimeout } = options;
+    const ipcChannel = this.wrapChannel(
+      `${IpcChannelType.Internal}:connect-to`,
+    );
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.rejectPendingRequest(requestId, new Error('Request timeout'));
+      }, timeout);
+
+      this.addPendingRequest(requestId, resolve, reject, timer);
+      ipcRenderer
+        .invoke(
+          ipcChannel,
+          this.wrapChannel(`${IpcChannelType.External}:${channel}`),
+          requestId,
+          options,
+        )
+        .catch((error) => {
+          this.rejectPendingRequest(requestId, error as Error);
+        });
+    });
+  }
+
+  onConnect(
+    channel: string,
+    listener: IpcRendererConnectionListener,
+  ): Unsubscribe {
+    const ipcChannel = this.wrapChannel(
+      `${IpcChannelType.External}:${channel}`,
+    );
+    const listeners = this.connectionListeners.get(ipcChannel) || new Set();
+    listeners.add(listener);
+    this.connectionListeners.set(ipcChannel, listeners);
+
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size) {
+        this.connectionListeners.delete(ipcChannel);
+      }
+    };
+  }
+
   /**
    * handle request from the other ipc renderers
    * @param channel ipc channel name
@@ -249,8 +350,12 @@ export function createForInterRenderers<
 
   const useIpcRendererService = <K extends string & IpcRendererId<T>>(
     _key: K,
-  ): IpcRendererService<IpcRequests<T, K>, IpcHandles<T, K>, T['main'], Q> => {
-    return ipcRendererService;
+  ): InterRendererIpcRendererService<T, K, Q> => {
+    return ipcRendererService as unknown as InterRendererIpcRendererService<
+      T,
+      K,
+      Q
+    >;
   };
 
   return useIpcRendererService;

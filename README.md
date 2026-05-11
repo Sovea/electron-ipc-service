@@ -132,3 +132,82 @@ export function App() {
   return <div>sub</div>;
 }
 ```
+
+### Direct Message Channel among renderer processes
+
+`connectTo` asks the main process to create a `MessageChannelMain`, transfer one port to the current renderer, and transfer the other port to the target renderer. After setup, messages sent through the returned port go directly between renderers.
+
+Listen for direct connections in the target renderer:
+
+```typescript
+const ipcRendererService = useIpcRendererService("sub");
+
+const unsubscribe = ipcRendererService.onConnect("direct-chat", (event, port) => {
+  console.log("direct connection from", event.sourceWebContentsId);
+
+  port.onmessage = (message) => {
+    console.log("message from main window", message.data);
+    port.postMessage("pong from sub window");
+  };
+});
+```
+
+Connect from another renderer:
+
+```typescript
+const ipcRendererService = useIpcRendererService("main");
+
+const port = await ipcRendererService.connectTo("direct-chat", {
+  windowParams: ["sub"],
+});
+
+port.onmessage = (message) => {
+  console.log("message from sub window", message.data);
+};
+port.postMessage("ping from main window");
+```
+
+You can also pass `webContentsId` directly:
+
+```typescript
+const port = await ipcRendererService.connectTo("direct-chat", {
+  webContentsId: subWindow.webContents.id,
+});
+```
+
+### Inter-renderer type inference
+
+When using `createForInterRenderers`, `windowParams[0]` should be the renderer unique identifier type from `MultiRenderersSchema`. That lets `invokeTo` and `sendTo` infer the target renderer's channel payload and response types even if multiple renderers declare the same channel name with different signatures.
+
+```typescript
+type WindowType = "main" | "sub" | "other";
+
+type IpcAmongRenderersSchema = MultiRenderersSchema<
+  WindowType,
+  {},
+  {
+    main: {
+      getInfo: (value: string) => number;
+    };
+    sub: {
+      getInfo: (value: number) => string;
+    };
+  },
+  {}
+>;
+
+const useIpcRendererService = createForInterRenderers<
+  IpcAmongRenderersSchema,
+  (type: WindowType) => number | undefined
+>();
+
+const ipcRendererService = useIpcRendererService("main");
+
+const result = await ipcRendererService.invokeTo("getInfo", {
+  windowParams: ["sub"],
+  data: [1],
+});
+// result is string
+```
+
+If you target by `webContentsId` without `windowParams`, the target renderer type cannot be known, so `invokeTo` returns `Promise<unknown>` and `data` is intentionally typed as `unknown[]`.

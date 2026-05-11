@@ -1,11 +1,11 @@
 import {
-  ipcMain,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
+  ipcMain,
+  MessageChannelMain,
   webContents,
 } from 'electron';
 import type { Promisable, RequireAtLeastOne } from 'type-fest';
-import { BaseIpcService } from './base';
 import { IpcChannelType } from '../constants';
 import type {
   Fn,
@@ -14,6 +14,7 @@ import type {
   ResponseData,
   Unsubscribe,
 } from '../types';
+import { BaseIpcService } from './base';
 
 interface IpcMainServiceOptions extends IpcServiceBaseOptions {
   /**
@@ -22,6 +23,15 @@ interface IpcMainServiceOptions extends IpcServiceBaseOptions {
    */
   getWebContentsId?: (...args: any[]) => number | undefined;
 }
+
+type TargetRendererOptions = RequireAtLeastOne<{
+  webContentsId: number;
+  windowParams: Parameters<Required<IpcMainServiceOptions>['getWebContentsId']>;
+}>;
+
+type ConnectToOptions = TargetRendererOptions & {
+  timeout?: number;
+};
 
 /**
  * ipc main service
@@ -36,6 +46,33 @@ export class IpcMainService<
   constructor(options?: IpcMainServiceOptions) {
     super(options);
     this.init();
+  }
+
+  private getTargetWebContentsId({
+    webContentsId,
+    windowParams,
+  }: TargetRendererOptions) {
+    return (
+      webContentsId ||
+      (windowParams
+        ? this.options.getWebContentsId?.(...windowParams)
+        : undefined)
+    );
+  }
+
+  private getTargetWebContents(options: TargetRendererOptions) {
+    const targetWebContentsId = this.getTargetWebContentsId(options);
+
+    if (!targetWebContentsId) {
+      throw new Error('webContentsId is required');
+    }
+
+    const target = webContents.fromId(targetWebContentsId);
+    if (!target) {
+      throw new Error(`webContents with id ${targetWebContentsId} not found`);
+    }
+
+    return { target, targetWebContentsId };
   }
 
   /**
@@ -56,29 +93,10 @@ export class IpcMainService<
           }>,
       ) => {
         const requestId = this.generateId();
-        const {
-          timeout: wait = this.options.pendingRequestTimeout,
-          data,
-          windowParams,
-          webContentsId,
-        } = options;
+        const { timeout: wait = this.options.pendingRequestTimeout, data } =
+          options;
         try {
-          const targetWebContentsId =
-            webContentsId ||
-            (windowParams
-              ? this.options.getWebContentsId?.(...windowParams)
-              : undefined);
-
-          if (!targetWebContentsId) {
-            throw new Error('webContentsId is required');
-          }
-
-          const target = webContents.fromId(targetWebContentsId);
-          if (!target) {
-            throw new Error(
-              `webContents with id ${targetWebContentsId} not found`,
-            );
-          }
+          const { target } = this.getTargetWebContents(options);
 
           return await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
@@ -134,38 +152,47 @@ export class IpcMainService<
         event: IpcMainEvent,
         channel: string,
         options: Omit<RequestOptions<any, any>, 'timeout'> &
-          RequireAtLeastOne<{
-            webContentsId: number;
-            windowParams: Parameters<
-              Required<IpcMainServiceOptions>['getWebContentsId']
-            >;
-          }>,
+          TargetRendererOptions,
       ) => {
-        try {
-          const { data, windowParams, webContentsId } = options;
+        const { data } = options;
+        const { target } = this.getTargetWebContents(options);
 
-          const targetWebContentsId =
-            webContentsId ||
-            (windowParams
-              ? this.options.getWebContentsId?.(...windowParams)
-              : undefined);
+        target.send(channel, data, {
+          webContentsId: event.sender.id,
+        });
+      },
+    );
+  }
 
-          if (!targetWebContentsId) {
-            throw new Error('webContentsId is required');
-          }
+  private handleConnectTo() {
+    ipcMain.handle(
+      this.wrapChannel(`${IpcChannelType.Internal}:connect-to`),
+      async (
+        event: IpcMainInvokeEvent,
+        channel: string,
+        requestId: string,
+        options: ConnectToOptions,
+      ) => {
+        const { target, targetWebContentsId } =
+          this.getTargetWebContents(options);
+        const { port1, port2 } = new MessageChannelMain();
+        const metadata = {
+          channel,
+          requestId,
+          sourceWebContentsId: event.sender.id,
+          targetWebContentsId,
+        };
 
-          const target = webContents.fromId(targetWebContentsId);
-          if (!target) {
-            throw new Error(
-              `webContents with id ${targetWebContentsId} not found`,
-            );
-          }
-          target.send(channel, data, {
-            webContentsId: event.sender.id,
-          });
-        } catch (error) {
-          throw error;
-        }
+        event.sender.postMessage(
+          this.wrapChannel(`${IpcChannelType.Internal}:message-port`),
+          { ...metadata, source: true },
+          [port1],
+        );
+        target.postMessage(
+          this.wrapChannel(`${IpcChannelType.Internal}:message-port`),
+          { ...metadata, source: false },
+          [port2],
+        );
       },
     );
   }
@@ -174,6 +201,7 @@ export class IpcMainService<
     this.handleInvokeTo();
     this.handleReplyTo();
     this.handleSendTo();
+    this.handleConnectTo();
   }
 
   /**
