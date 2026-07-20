@@ -1,17 +1,16 @@
-import { ipcRenderer, type IpcRendererEvent } from 'electron';
+import { type IpcRendererEvent, ipcRenderer } from 'electron';
 import type { RequireAtLeastOne } from 'type-fest';
-import { BaseIpcService } from './base';
-import { processFunction } from '../utils/fn';
 import { IpcChannelType } from '../constants';
 import type { Fn, Optional, RequestOptions, Unsubscribe } from '../types';
 import type {
   APIBetweenRenderers,
-  IpcHandles,
+  InterRendererIpcRendererService,
   IpcRendererId,
   IpcRendererServiceListener,
-  IpcRequests,
   MultiRenderersSchema,
 } from '../types/renderer';
+import { processFunction } from '../utils/fn';
+import { BaseIpcService } from './base';
 
 /**
  * ipc renderer service
@@ -114,7 +113,7 @@ export class IpcRendererService<
         webContentsId?: number;
         windowParams?: Parameters<Q>;
       }>,
-  ) {
+  ): Promise<Awaited<ReturnType<R[K]>>> {
     const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:invoke-to`);
     return ipcRenderer.invoke(
       ipcChannel,
@@ -249,8 +248,13 @@ export function createForInterRenderers<
 
   const useIpcRendererService = <K extends string & IpcRendererId<T>>(
     _key: K,
-  ): IpcRendererService<IpcRequests<T, K>, IpcHandles<T, K>, T['main'], Q> => {
-    return ipcRendererService;
+  ): InterRendererIpcRendererService<T, K, Q> => {
+    // One runtime instance is shared; the current renderer only specializes its public type.
+    return ipcRendererService as unknown as InterRendererIpcRendererService<
+      T,
+      K,
+      Q
+    >;
   };
 
   return useIpcRendererService;
