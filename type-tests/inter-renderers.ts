@@ -65,15 +65,18 @@ export type OtherResult = Expect<
   Equal<typeof otherResult, Promise<'other-result'>>
 >;
 
-// The getWebContentsId/schema relationship stays strict when an ID is also supplied.
-const bothTargetsResult = mainService.invokeTo('getInfo', {
+// Target selectors are mutually exclusive, even when they identify the same renderer.
+// @ts-expect-error webContentsId and windowParams cannot be supplied together
+mainService.invokeTo('getInfo', {
   webContentsId: 1,
   windowParams: ['sub', 'workspace'],
   data: [1],
 });
-export type BothTargetsResult = Expect<
-  Equal<typeof bothTargetsResult, Promise<'sub-result'>>
->;
+
+// @ts-expect-error exactly one target selector is required
+mainService.invokeTo('getInfo', {
+  data: [1],
+});
 
 // Shared and target-unique channels retain their own return types.
 const commonResult = mainService.invokeTo('ping', {
@@ -109,6 +112,18 @@ export type UnknownResult = Expect<
 mainService.sendTo('getInfo', {
   webContentsId: 1,
   data: [{ callerSpecifiedTarget: true }],
+});
+
+// @ts-expect-error sendTo target selectors are mutually exclusive
+mainService.sendTo('getInfo', {
+  webContentsId: 1,
+  windowParams: ['sub', 'workspace'],
+  data: [1],
+});
+
+// @ts-expect-error sendTo also requires exactly one target selector
+mainService.sendTo('getInfo', {
+  data: [1],
 });
 
 // Invalid target-aware calls must remain compile-time errors.
@@ -159,3 +174,15 @@ const directResult = directService.invokeTo('unique', {
   data: ['id'],
 });
 export type DirectResult = Expect<Equal<typeof directResult, Promise<number>>>;
+
+// @ts-expect-error the base service also rejects two target selectors
+directService.invokeTo('unique', {
+  webContentsId: 1,
+  windowParams: ['sub', 'workspace'],
+  data: ['id'],
+});
+
+// @ts-expect-error the base service sendTo requires exactly one selector
+directService.sendTo('unique', {
+  data: ['id'],
+});

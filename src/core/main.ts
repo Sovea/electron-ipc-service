@@ -1,11 +1,9 @@
-import {
-  ipcMain,
+import electron, {
   type IpcMainEvent,
   type IpcMainInvokeEvent,
-  webContents,
+  type WebContents,
 } from 'electron';
-import type { Promisable, RequireAtLeastOne } from 'type-fest';
-import { BaseIpcService } from './base';
+import type { Promisable, RequireExactlyOne } from 'type-fest';
 import { IpcChannelType } from '../constants';
 import type {
   Fn,
@@ -14,6 +12,9 @@ import type {
   ResponseData,
   Unsubscribe,
 } from '../types';
+import { BaseIpcService } from './base';
+
+const { ipcMain, webContents } = electron;
 
 interface IpcMainServiceOptions extends IpcServiceBaseOptions {
   /**
@@ -23,6 +24,11 @@ interface IpcMainServiceOptions extends IpcServiceBaseOptions {
   getWebContentsId?: (...args: any[]) => number | undefined;
 }
 
+type WebContentsTargetOptions = RequireExactlyOne<{
+  webContentsId: number;
+  windowParams: Parameters<Required<IpcMainServiceOptions>['getWebContentsId']>;
+}>;
+
 /**
  * ipc main service
  * @template T - handle ipc type
@@ -31,6 +37,10 @@ export class IpcMainService<
   T extends Record<string, Fn>,
 > extends BaseIpcService {
   declare options: IpcMainServiceOptions;
+
+  private internalDisposers: Unsubscribe[] = [];
+
+  private isDestroyed = false;
 
   constructor(options?: IpcMainServiceOptions);
   constructor(options?: IpcMainServiceOptions) {
@@ -42,138 +52,144 @@ export class IpcMainService<
    * handle invokeTo request from ipc renderer
    */
   private handleInvokeTo() {
-    ipcMain.handle(
-      this.wrapChannel(`${IpcChannelType.Internal}:invoke-to`),
-      async (
-        event: IpcMainInvokeEvent,
-        channel: string,
-        options: RequestOptions<any, any> &
-          RequireAtLeastOne<{
-            webContentsId: number;
-            windowParams: Parameters<
-              Required<IpcMainServiceOptions>['getWebContentsId']
-            >;
-          }>,
-      ) => {
-        const requestId = this.generateId();
-        const {
-          timeout: wait = this.options.pendingRequestTimeout,
-          data,
-          windowParams,
-          webContentsId,
-        } = options;
+    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:invoke-to`);
+    const listener = async (
+      event: IpcMainInvokeEvent,
+      channel: string,
+      options: RequestOptions<any, any> & WebContentsTargetOptions,
+    ) => {
+      const requestId = this.generateId();
+      const { timeout: wait = this.options.pendingRequestTimeout, data } =
+        options;
+      const target = this.resolveTargetWebContents(options);
+
+      return await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          this.rejectPendingRequest(requestId, new Error('Request timeout'));
+        }, wait);
+
+        // Register before dispatch so even an immediate reply has an owner.
+        this.addPendingRequest(requestId, resolve, reject, timeout);
         try {
-          const targetWebContentsId =
-            webContentsId ||
-            (windowParams
-              ? this.options.getWebContentsId?.(...windowParams)
-              : undefined);
-
-          if (!targetWebContentsId) {
-            throw new Error('webContentsId is required');
-          }
-
-          const target = webContents.fromId(targetWebContentsId);
-          if (!target) {
-            throw new Error(
-              `webContents with id ${targetWebContentsId} not found`,
-            );
-          }
-
-          return await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              this.rejectPendingRequest(
-                requestId,
-                new Error('Request timeout'),
-              );
-              clearTimeout(timeout);
-            }, wait);
-
-            target.send(channel, data, {
-              requestId,
-              webContentsId: event.sender.id,
-              timeout: wait,
-            });
-            this.addPendingRequest(requestId, resolve, reject, timeout);
+          target.send(channel, data, {
+            requestId,
+            webContentsId: event.sender.id,
+            timeout: wait,
           });
         } catch (error) {
-          this.rejectPendingRequest(requestId, error as Error);
+          this.rejectPendingRequest(requestId, this.toError(error));
         }
-      },
-    );
+      });
+    };
+
+    ipcMain.handle(ipcChannel, listener);
+    return () => {
+      ipcMain.removeHandler(ipcChannel);
+    };
   }
 
   /**
    * handle replyTo request from ipc renderer
    */
   private handleReplyTo() {
-    ipcMain.on(
-      this.wrapChannel(`${IpcChannelType.Internal}:reply-to`),
-      (
-        _event: IpcMainEvent,
-        requestId: string,
-        responseData: unknown,
-        error?: Error,
-      ) => {
-        if (error) {
-          this.rejectPendingRequest(requestId, error);
-        } else {
-          this.resolvePendingRequest(requestId, responseData);
-        }
-      },
-    );
+    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:reply-to`);
+    const listener = (
+      _event: IpcMainEvent,
+      requestId: string,
+      responseData: unknown,
+      error?: Error,
+    ) => {
+      if (error) {
+        this.rejectPendingRequest(requestId, error);
+      } else {
+        this.resolvePendingRequest(requestId, responseData);
+      }
+    };
+
+    ipcMain.on(ipcChannel, listener);
+    return () => {
+      ipcMain.off(ipcChannel, listener);
+    };
   }
 
   /**
    * handle sendTo request from ipc renderer
    */
   private handleSendTo() {
-    ipcMain.on(
-      this.wrapChannel(`${IpcChannelType.Internal}:send-to`),
-      (
-        event: IpcMainEvent,
-        channel: string,
-        options: Omit<RequestOptions<any, any>, 'timeout'> &
-          RequireAtLeastOne<{
-            webContentsId: number;
-            windowParams: Parameters<
-              Required<IpcMainServiceOptions>['getWebContentsId']
-            >;
-          }>,
-      ) => {
-        try {
-          const { data, windowParams, webContentsId } = options;
+    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:send-to`);
+    const listener = (
+      event: IpcMainEvent,
+      channel: string,
+      options: Omit<RequestOptions<any, any>, 'timeout'> &
+        WebContentsTargetOptions,
+    ) => {
+      try {
+        const { data } = options;
+        const target = this.resolveTargetWebContents(options);
+        target.send(channel, data, {
+          webContentsId: event.sender.id,
+        });
+      } catch (error) {
+        console.warn(
+          `[electron-ipc-service] sendTo dropped "${channel}": ${this.toError(error).message}`,
+        );
+      }
+    };
 
-          const targetWebContentsId =
-            webContentsId ||
-            (windowParams
-              ? this.options.getWebContentsId?.(...windowParams)
-              : undefined);
+    ipcMain.on(ipcChannel, listener);
+    return () => {
+      ipcMain.off(ipcChannel, listener);
+    };
+  }
 
-          if (!targetWebContentsId) {
-            throw new Error('webContentsId is required');
-          }
+  /** Resolve and validate both supported target selectors in one place. */
+  private resolveTargetWebContents(
+    options: WebContentsTargetOptions,
+  ): WebContents {
+    const { webContentsId, windowParams } = options;
+    const hasWebContentsId = webContentsId !== undefined;
+    const hasWindowParams = windowParams !== undefined;
 
-          const target = webContents.fromId(targetWebContentsId);
-          if (!target) {
-            throw new Error(
-              `webContents with id ${targetWebContentsId} not found`,
-            );
-          }
-          target.send(channel, data, {
-            webContentsId: event.sender.id,
-          });
-        } catch (error) {
-          throw error;
-        }
-      },
-    );
+    // Reject ambiguous input before a potentially stateful target lookup.
+    if (hasWebContentsId === hasWindowParams) {
+      throw new Error(
+        'exactly one of webContentsId or windowParams is required',
+      );
+    }
+
+    const targetWebContentsId = hasWindowParams
+      ? this.options.getWebContentsId?.(...windowParams)
+      : webContentsId;
+    if (targetWebContentsId === undefined) {
+      throw new Error('windowParams did not resolve to a webContentsId');
+    }
+
+    const target = webContents.fromId(targetWebContentsId);
+    if (!target) {
+      throw new Error(`webContents with id ${targetWebContentsId} not found`);
+    }
+    return target;
+  }
+
+  private toError(error: unknown): Error {
+    return error instanceof Error ? error : new Error(String(error));
   }
 
   private init() {
-    this.handleInvokeTo();
-    this.handleReplyTo();
-    this.handleSendTo();
+    try {
+      this.internalDisposers.push(this.handleInvokeTo());
+      this.internalDisposers.push(this.handleReplyTo());
+      this.internalDisposers.push(this.handleSendTo());
+    } catch (error) {
+      this.disposeInternalHandlers();
+      throw error;
+    }
+  }
+
+  private disposeInternalHandlers() {
+    for (const dispose of this.internalDisposers.splice(0)) {
+      dispose();
+    }
   }
 
   /**
@@ -229,7 +245,7 @@ export class IpcMainService<
     );
     ipcMain.handle(ipcChannel, listener);
     return () => {
-      ipcMain.off(ipcChannel, listener);
+      ipcMain.removeHandler(ipcChannel);
     };
   }
 
@@ -250,7 +266,16 @@ export class IpcMainService<
     );
     ipcMain.handleOnce(ipcChannel, listener);
     return () => {
-      ipcMain.off(ipcChannel, listener);
+      ipcMain.removeHandler(ipcChannel);
     };
+  }
+
+  override destroy() {
+    if (this.isDestroyed) {
+      return;
+    }
+    this.isDestroyed = true;
+    this.disposeInternalHandlers();
+    super.destroy();
   }
 }

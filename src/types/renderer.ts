@@ -130,7 +130,7 @@ export type IpcInvokeToOptions<
   K extends IpcRendererId<T>,
   C extends keyof IpcRendererChannels<T, K>,
 > = RequestOptions<IpcRendererChannels<T, K>, C> & {
-  webContentsId?: number;
+  webContentsId?: never;
   windowParams: IpcWindowParams<T, Q, K>;
 };
 
@@ -140,7 +140,7 @@ export type IpcSendToOptions<
   K extends IpcRendererId<T>,
   C extends keyof IpcRendererChannels<T, K>,
 > = Omit<RequestOptions<IpcRendererChannels<T, K>, C>, 'timeout'> & {
-  webContentsId?: number;
+  webContentsId?: never;
   windowParams: IpcWindowParams<T, Q, K>;
 };
 
