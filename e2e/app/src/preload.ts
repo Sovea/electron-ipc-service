@@ -1,17 +1,21 @@
 import {
-  type createForInterRenderers,
-  IpcRendererService,
+  create,
+  createForInterRenderers,
 } from '@sovea/electron-ipc-service/renderer';
 import electron from 'electron';
 import type {
   DriverEvent,
   E2EDriver,
   GetWebContentsId,
+  MainSchema,
   RendererId,
   RendererSchema,
   TargetOptions,
 } from './schema';
-import { rendererIds } from './schema';
+import {
+  ipcChannelPrefix as expectedChannelPrefix,
+  rendererIds,
+} from './schema';
 
 const { contextBridge, ipcRenderer } = electron;
 
@@ -35,20 +39,16 @@ function assertRendererId(value: string | undefined): RendererId {
 const rendererId = assertRendererId(readArgument('e2e-renderer-id'));
 const channelPrefix = readArgument('e2e-channel-prefix');
 const workspaceId = readArgument('e2e-workspace-id');
-if (!channelPrefix) {
-  throw new Error('Missing e2e channel prefix');
+if (channelPrefix !== expectedChannelPrefix) {
+  throw new Error(`Unexpected e2e channel prefix: ${String(channelPrefix)}`);
 }
 if (!workspaceId) {
   throw new Error('Missing e2e workspace id');
 }
 
 const events: DriverEvent[] = [];
-const sharedRuntimeService = new IpcRendererService({
-  ipcChannelPrefix: channelPrefix,
-});
-const useService = ((_key: RendererId) => sharedRuntimeService) as ReturnType<
-  typeof createForInterRenderers<RendererSchema, GetWebContentsId>
->;
+const mainService = create<MainSchema>();
+const useService = createForInterRenderers<RendererSchema, GetWebContentsId>();
 const services = {
   main: useService('main'),
   sub: useService('sub'),
@@ -162,31 +162,38 @@ if (rendererId === 'other') {
   });
 }
 
-type RuntimeService = {
+type MainRuntimeService = {
   invoke(
     channel: string,
     options: { data?: unknown[]; timeout?: number },
   ): Promise<unknown>;
   send(channel: string, ...data: unknown[]): void;
+};
+
+type InterRendererRuntimeService = {
   invokeTo(channel: string, options: TargetOptions): Promise<unknown>;
   sendTo(channel: string, options: Omit<TargetOptions, 'timeout'>): void;
 };
 
-const runtimeService = services[rendererId] as unknown as RuntimeService;
+// The driver intentionally accepts arbitrary wire input for negative E2E cases.
+const mainRuntimeService = mainService as unknown as MainRuntimeService;
+const interRendererRuntimeService = services[
+  rendererId
+] as unknown as InterRendererRuntimeService;
 const driver: E2EDriver = {
   ready: true,
   rendererId,
   invokeMain(channel, data = [], timeout) {
-    return runtimeService.invoke(channel, { data, timeout });
+    return mainRuntimeService.invoke(channel, { data, timeout });
   },
   sendMain(channel, data = []) {
-    runtimeService.send(channel, ...data);
+    mainRuntimeService.send(channel, ...data);
   },
   invokeTo(channel, options) {
-    return runtimeService.invokeTo(channel, options);
+    return interRendererRuntimeService.invokeTo(channel, options);
   },
   sendTo(channel, options) {
-    runtimeService.sendTo(channel, options);
+    interRendererRuntimeService.sendTo(channel, options);
   },
   getEvents() {
     return [...events];

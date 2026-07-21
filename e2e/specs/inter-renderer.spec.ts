@@ -72,6 +72,10 @@ test('sendTo preserves payload and source metadata', async ({
     data: ['message'],
     windowParams: ['sub', electronHarness.workspaceId],
   });
+  await sendTo(main, 'receiveMessage', {
+    data: ['message-by-id'],
+    webContentsId: state.windowIds.sub,
+  });
   await sendTo(main, 'receiveOnceMessage', {
     data: ['first'],
     windowParams: ['sub', electronHarness.workspaceId],
@@ -93,6 +97,11 @@ test('sendTo preserves payload and source metadata', async ({
           kind: 'receive',
           channel: 'receiveMessage',
           data: 'message',
+        },
+        {
+          kind: 'receive',
+          channel: 'receiveMessage',
+          data: 'message-by-id',
         },
         {
           kind: 'wire',
@@ -212,7 +221,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "e2e:[^"]+:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
+        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
       ),
     )
     .toBe(true);
@@ -225,7 +234,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "e2e:[^"]+:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
+        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
       ),
     )
     .toBe(true);
@@ -236,7 +245,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "e2e:[^"]+:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
+        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
       ),
     )
     .toBe(true);
@@ -248,7 +257,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "e2e:[^"]+:external:receiveMessage": windowParams did not resolve to a webContentsId$/,
+        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": windowParams did not resolve to a webContentsId$/,
       ),
     )
     .toBe(true);
@@ -260,7 +269,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "e2e:[^"]+:external:receiveMessage": webContents with id 999999 not found$/,
+        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": webContents with id 999999 not found$/,
       ),
     )
     .toBe(true);

@@ -1,6 +1,7 @@
 import type { MultiRenderersSchema } from '@sovea/electron-ipc-service/renderer';
 
 export const rendererIds = ['main', 'sub', 'other'] as const;
+export const ipcChannelPrefix = 'ipc-service:';
 
 export type RendererId = (typeof rendererIds)[number];
 

@@ -1,8 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import path from 'node:path';
 import {
   test as base,
   type ElectronApplication,
@@ -10,16 +8,12 @@ import {
   expect,
   type Page,
 } from '@playwright/test';
-import { type RendererId, rendererIds } from '../app/src/schema';
-
-const require = createRequire(import.meta.url);
-const playwrightElectronLoader = path.join(
-  path.dirname(require.resolve('playwright-core/package.json')),
-  'lib',
-  'server',
-  'electron',
-  'loader.js',
-);
+import {
+  ipcChannelPrefix,
+  type RendererId,
+  rendererIds,
+} from '../app/src/schema';
+import { resolvePlaywrightElectronBridge } from '../support/playwright-electron';
 
 export type ElectronHarness = {
   app: ElectronApplication;
@@ -40,6 +34,17 @@ function requiredEnvironment(name: string) {
     throw new Error(`${name} is required; run tests through pnpm test:e2e`);
   }
   return value;
+}
+
+function serializeError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return { message: String(error) };
+  }
+  return {
+    message: error.message,
+    name: error.name,
+    stack: error.stack,
+  };
 }
 
 function hasExited(child: ChildProcess) {
@@ -119,9 +124,10 @@ export const test = base.extend<Fixtures>({
       const consumerDir = requiredEnvironment('E2E_CONSUMER_DIR');
       const executablePath = requiredEnvironment('E2E_ELECTRON_EXECUTABLE');
       const electronVersion = requiredEnvironment('E2E_ELECTRON_VERSION');
+      const playwrightBridge = resolvePlaywrightElectronBridge();
       const runId = randomUUID();
       const workspaceId = `workspace-${runId}`;
-      const channelPrefix = `e2e:${runId}:`;
+      const channelPrefix = ipcChannelPrefix;
       const userDataDir = testInfo.outputPath('user-data');
       await mkdir(userDataDir, { recursive: true });
 
@@ -137,19 +143,53 @@ export const test = base.extend<Fixtures>({
       const launchEnvironment = { ...process.env };
       delete launchEnvironment.NO_COLOR;
 
-      const app = await electron.launch({
-        executablePath,
-        args: [`--user-data-dir=${userDataDir}`, '.'],
-        cwd: consumerDir,
-        env: {
-          ...launchEnvironment,
-          E2E_CHANNEL_PREFIX: channelPrefix,
-          E2E_PLAYWRIGHT_ELECTRON_LOADER: playwrightElectronLoader,
-          E2E_USER_DATA_DIR: userDataDir,
-          E2E_WORKSPACE_ID: workspaceId,
-        },
-        timeout: 30_000,
-      });
+      let app: ElectronApplication;
+      try {
+        app = await electron.launch({
+          executablePath,
+          args: [`--user-data-dir=${userDataDir}`, '.'],
+          cwd: consumerDir,
+          env: {
+            ...launchEnvironment,
+            E2E_CHANNEL_PREFIX: channelPrefix,
+            E2E_PLAYWRIGHT_ELECTRON_LOADER: playwrightBridge.loaderPath,
+            E2E_PLAYWRIGHT_VERSION: playwrightBridge.version,
+            E2E_USER_DATA_DIR: userDataDir,
+            E2E_WORKSPACE_ID: workspaceId,
+          },
+          timeout: 30_000,
+        });
+      } catch (error) {
+        const launchDiagnostic = {
+          stage: 'playwright',
+          electron: {
+            requested: process.env.E2E_REQUESTED_ELECTRON,
+            resolved: electronVersion,
+          },
+          stress: process.env.E2E_STRESS === '1',
+          platform: process.platform,
+          arch: process.arch,
+          node: process.version,
+          packageManager: process.env.E2E_PACKAGE_MANAGER,
+          directories: {
+            root: process.env.E2E_ROOT_DIR,
+            run: process.env.E2E_RUN_DIR,
+            consumer: consumerDir,
+          },
+          executablePath,
+          playwright: playwrightBridge,
+          recordedAt: new Date().toISOString(),
+          error: serializeError(error),
+        };
+        await testInfo.attach('electron-launch', {
+          body: Buffer.from(
+            `${JSON.stringify(launchDiagnostic, null, 2)}\n`,
+            'utf8',
+          ),
+          contentType: 'application/json',
+        });
+        throw error;
+      }
       const child = app.process();
 
       child.stdout?.on('data', (chunk) => {

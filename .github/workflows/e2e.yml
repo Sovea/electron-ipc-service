@@ -10,17 +10,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CI: true
 
 jobs:
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.10.0
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -29,7 +32,7 @@ jobs:
       - run: pnpm exec tsc -p tsconfig.json --noEmit
       - run: pnpm run test:types
       - run: pnpm run test:e2e:types
-      - run: pnpm run build
+      - run: pnpm run test:e2e:runner
       - run: pnpm run pack:check
       - run: pnpm run check:ci
 
@@ -41,22 +44,24 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            electron: '28.0.0'
+            electron: minimum
           - os: ubuntu-latest
-            electron: '43.1.1'
+            electron: current
           - os: windows-latest
-            electron: '43.1.1'
+            electron: current
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.10.0
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: pnpm run test:e2e:install-deps
       - name: Run E2E on Linux
         if: runner.os == 'Linux'
         run: xvfb-run -a pnpm run test:e2e
@@ -84,18 +89,20 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        electron: ['28.0.0', '43.1.1']
+        electron: [minimum, current]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.10.0
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: pnpm run test:e2e:install-deps
       - name: Run E2E on Linux
         if: runner.os == 'Linux'
         run: xvfb-run -a pnpm run test:e2e
@@ -118,24 +125,24 @@ jobs:
 
   e2e-stress:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    name: E2E stress (Ubuntu, Electron 43.1.1)
+    name: E2E stress (Ubuntu, Electron current)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.10.0
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm run test:e2e:install-deps
       - run: xvfb-run -a pnpm run test:e2e:stress
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-stress-ubuntu-43.1.1
+          name: e2e-stress-ubuntu-current
           path: |
             playwright-report
             test-results

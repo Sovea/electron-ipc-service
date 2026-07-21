@@ -13,18 +13,28 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  assertMinimumElectronDependency,
+  createSetupDiagnostic,
+  createStageTracker,
+  preflightElectron,
+  resolveElectronVersion,
+} from './e2e/runtime.mjs';
 
 const rootDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
+const fixtureDir = path.join(rootDir, 'e2e', 'app');
+const setupReportPath = path.join(rootDir, 'test-results', 'e2e-setup.json');
 const arguments_ = process.argv.slice(2);
 const electronArgumentIndex = arguments_.indexOf('--electron');
-const electronVersion =
+const requestedElectron =
   electronArgumentIndex >= 0
     ? arguments_[electronArgumentIndex + 1]
-    : process.env.E2E_ELECTRON_VERSION || '28.0.0';
+    : process.env.E2E_ELECTRON_VERSION || 'minimum';
 const stress = arguments_.includes('--stress');
+const tracker = createStageTracker();
 const toolVersions = {
   '@types/node': '22.18.1',
   typescript: '5.9.2',
@@ -32,15 +42,11 @@ const toolVersions = {
   'vite-plugin-electron': '1.1.0',
 };
 
-if (!electronVersion || electronVersion.startsWith('--')) {
-  throw new Error('--electron requires a version');
-}
-
-const safeVersion = electronVersion.replaceAll(/[^a-zA-Z0-9.-]/g, '-');
-const runDir = await mkdtemp(path.join(tmpdir(), `eis-e2e-${safeVersion}-`));
-const packageDir = path.join(runDir, 'package');
-const consumerDir = path.join(runDir, 'consumer');
-const fixtureDir = path.join(rootDir, 'e2e', 'app');
+let packageManager = 'unknown';
+let electronVersion;
+let runDir;
+let packageDir;
+let consumerDir;
 
 async function run(command, args, options = {}) {
   await new Promise((resolve, reject) => {
@@ -58,7 +64,9 @@ async function run(command, args, options = {}) {
       }
       reject(
         new Error(
-          `${command} ${args.join(' ')} failed with ${signal || `exit code ${code}`}`,
+          `${command} ${args.join(' ')} failed with ${
+            signal || `exit code ${code}`
+          }`,
         ),
       );
     });
@@ -146,13 +154,16 @@ async function assertInstalledPackage() {
 }
 
 async function prepareConsumer() {
-  await runPnpm(['run', 'test:e2e:types']);
+  tracker.enter('build');
   await rm(path.join(rootDir, 'esm'), { force: true, recursive: true });
   await mkdir(packageDir, { recursive: true });
-
   await runPnpm(['run', 'build']);
-  await runPnpm(['pack', '--pack-destination', packageDir]);
 
+  tracker.enter('e2e-typecheck');
+  await runPnpm(['run', 'test:e2e:types']);
+
+  tracker.enter('pack');
+  await runPnpm(['pack', '--pack-destination', packageDir]);
   const tarballName = (await readdir(packageDir)).find((name) =>
     name.endsWith('.tgz'),
   );
@@ -169,6 +180,7 @@ async function prepareConsumer() {
         private: true,
         type: 'module',
         main: 'playwright-bootstrap.cjs',
+        packageManager,
         dependencies: {
           '@sovea/electron-ipc-service': `file:../package/${tarballName}`,
         },
@@ -176,33 +188,88 @@ async function prepareConsumer() {
           electron: electronVersion,
           ...toolVersions,
         },
-        pnpm: {
-          onlyBuiltDependencies: ['electron'],
-        },
       },
       null,
       2,
     )}\n`,
     'utf8',
   );
+  await writeFile(
+    path.join(consumerDir, 'pnpm-workspace.yaml'),
+    'allowBuilds:\n  electron: true\n',
+    'utf8',
+  );
 
-  await runPnpm(['install', '--ignore-workspace', '--no-frozen-lockfile'], {
-    cwd: consumerDir,
-  });
+  tracker.enter('install');
+  await runPnpm(['install', '--no-frozen-lockfile'], { cwd: consumerDir });
   await assertInstalledPackage();
+
+  tracker.enter('consumer-typecheck');
   await runPnpm(['exec', 'tsc', '-p', 'tsconfig.json'], { cwd: consumerDir });
+
+  tracker.enter('vite-build');
   await runPnpm(['exec', 'vite', 'build', '.', '--config', 'vite.config.ts'], {
     cwd: consumerDir,
   });
   await assertExternalImports();
 }
 
+async function initialize() {
+  const safeRequestedVersion = String(
+    requestedElectron || 'invalid',
+  ).replaceAll(/[^a-zA-Z0-9.-]/g, '-');
+  runDir = await mkdtemp(
+    path.join(tmpdir(), `eis-e2e-${safeRequestedVersion}-`),
+  );
+  packageDir = path.join(runDir, 'package');
+  consumerDir = path.join(runDir, 'consumer');
+
+  if (!requestedElectron || requestedElectron.startsWith('--')) {
+    throw new Error('--electron requires a version or alias');
+  }
+
+  const [manifest, versions] = await Promise.all([
+    readFile(path.join(rootDir, 'package.json'), 'utf8').then(JSON.parse),
+    readFile(path.join(rootDir, 'e2e', 'electron-versions.json'), 'utf8').then(
+      JSON.parse,
+    ),
+  ]);
+  packageManager = manifest.packageManager;
+  if (!/^pnpm@\d+\.\d+\.\d+$/.test(packageManager)) {
+    throw new Error('packageManager must pin an exact pnpm version');
+  }
+  assertMinimumElectronDependency(manifest, versions);
+  electronVersion = resolveElectronVersion(requestedElectron, versions);
+  await rm(setupReportPath, { force: true });
+}
+
 async function main() {
-  console.log(`[e2e] Electron ${electronVersion}; consumer ${consumerDir}`);
+  await initialize();
+  console.log(
+    `[e2e] Electron ${requestedElectron} -> ${electronVersion}; consumer ${consumerDir}`,
+  );
   await prepareConsumer();
 
+  tracker.enter('electron-preflight');
   const consumerRequire = createRequire(path.join(consumerDir, 'package.json'));
   const electronExecutable = consumerRequire('electron');
+  const launchEnvironment = { ...process.env };
+  delete launchEnvironment.NO_COLOR;
+
+  const preflight = await preflightElectron(
+    electronExecutable,
+    electronVersion,
+    {
+      cwd: consumerDir,
+      env: launchEnvironment,
+    },
+  );
+  console.log(
+    `[e2e] Electron preflight: ${(
+      preflight.stdout || preflight.stderr
+    ).trim()}`,
+  );
+
   const testArgs = [
     'exec',
     'playwright',
@@ -214,22 +281,62 @@ async function main() {
     testArgs.push('--grep', '@stress', '--repeat-each', '5');
   }
 
-  const testEnvironment = {
-    ...process.env,
-    E2E_CONSUMER_DIR: consumerDir,
-    E2E_ELECTRON_EXECUTABLE: electronExecutable,
-    E2E_ELECTRON_VERSION: electronVersion,
-    E2E_STRESS: stress ? '1' : '0',
-  };
-  delete testEnvironment.NO_COLOR;
+  tracker.enter('playwright');
   await runPnpm(testArgs, {
-    env: testEnvironment,
+    env: {
+      ...launchEnvironment,
+      E2E_CONSUMER_DIR: consumerDir,
+      E2E_ELECTRON_EXECUTABLE: electronExecutable,
+      E2E_ELECTRON_VERSION: electronVersion,
+      E2E_PACKAGE_MANAGER: packageManager,
+      E2E_REQUESTED_ELECTRON: requestedElectron,
+      E2E_ROOT_DIR: rootDir,
+      E2E_RUN_DIR: runDir,
+      E2E_STRESS: stress ? '1' : '0',
+    },
   });
+
+  tracker.enter('cleanup');
   await rm(runDir, { force: true, recursive: true });
 }
 
-main().catch((error) => {
+async function writeSetupReport(error) {
+  await mkdir(path.dirname(setupReportPath), { recursive: true });
+  await writeFile(
+    setupReportPath,
+    `${JSON.stringify(
+      createSetupDiagnostic(
+        {
+          consumerDir,
+          electronVersion,
+          packageManager,
+          requestedElectron,
+          rootDir,
+          runDir,
+          stage: tracker.current,
+          stress,
+        },
+        error,
+      ),
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+}
+
+try {
+  await main();
+} catch (error) {
+  try {
+    await writeSetupReport(error);
+    console.error(`[e2e] Setup report: ${setupReportPath}`);
+  } catch (reportError) {
+    console.error('[e2e] Failed to write setup report', reportError);
+  }
   console.error(error);
-  console.error(`[e2e] Preserved failed consumer at ${runDir}`);
+  if (runDir) {
+    console.error(`[e2e] Preserved failed consumer at ${runDir}`);
+  }
   process.exitCode = 1;
-});
+}
