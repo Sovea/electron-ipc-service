@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>electron-ipc-service e2e</title>
+  </head>
+  <body>
+    <main>
+      <h1>Electron IPC Service</h1>
+      <output id="renderer-id">booting</output>
+    </main>
+    <script type="module" src="/src/renderer.ts"></script>
+  </body>
+</html>

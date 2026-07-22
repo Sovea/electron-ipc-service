@@ -1,17 +1,28 @@
-import { ipcRenderer, type IpcRendererEvent } from 'electron';
-import type { RequireAtLeastOne } from 'type-fest';
-import { BaseIpcService } from './base';
-import { processFunction } from '../utils/fn';
+import electron, { type IpcRendererEvent } from 'electron';
+import type { RequireExactlyOne } from 'type-fest';
 import { IpcChannelType } from '../constants';
 import type { Fn, Optional, RequestOptions, Unsubscribe } from '../types';
 import type {
   APIBetweenRenderers,
-  IpcHandles,
+  InterRendererIpcRendererService,
   IpcRendererId,
   IpcRendererServiceListener,
-  IpcRequests,
   MultiRenderersSchema,
 } from '../types/renderer';
+import { processFunction } from '../utils/fn';
+import { BaseIpcService } from './base';
+
+const { ipcRenderer } = electron;
+
+/** Unpack the wire tuple so receive listeners get their declared arguments. */
+function wrapReceiveListener<H extends Record<string, Fn>, K extends keyof H>(
+  listener: (event: IpcRendererEvent, ...args: Parameters<H[K]>) => void,
+) {
+  return (event: IpcRendererEvent, data?: Parameters<H[K]>) => {
+    const requestData = data ?? ([] as unknown as Parameters<H[K]>);
+    listener(event, ...requestData);
+  };
+}
 
 /**
  * ipc renderer service
@@ -103,18 +114,18 @@ export class IpcRendererService<
    * @param channel ipc channel name
    * @param options.data request data
    * @param options.timeout request timeout in milliseconds
-   * @param options.webContentsId target webContents id
-   * @param options.windowParams target webContents id query function parameters
+   * @param options.webContentsId target webContents id (mutually exclusive with windowParams)
+   * @param options.windowParams target query parameters (mutually exclusive with webContentsId)
    * @returns
    */
   invokeTo<K extends keyof R & string>(
     channel: K,
     options: RequestOptions<R, K> &
-      RequireAtLeastOne<{
-        webContentsId?: number;
-        windowParams?: Parameters<Q>;
+      RequireExactlyOne<{
+        webContentsId: number;
+        windowParams: Parameters<Q>;
       }>,
-  ) {
+  ): Promise<Awaited<ReturnType<R[K]>>> {
     const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:invoke-to`);
     return ipcRenderer.invoke(
       ipcChannel,
@@ -127,16 +138,16 @@ export class IpcRendererService<
    * send to target renderer process
    * @param channel ipc channel name
    * @param options.data request data
-   * @param options.webContentsId target webContents id
-   * @param options.windowParams target webContents id query function parameters
+   * @param options.webContentsId target webContents id (mutually exclusive with windowParams)
+   * @param options.windowParams target query parameters (mutually exclusive with webContentsId)
    * @returns
    */
   sendTo<K extends keyof R & string>(
     channel: K,
     options: Omit<RequestOptions<R, K>, 'timeout'> &
-      RequireAtLeastOne<{
-        webContentsId?: number;
-        windowParams?: Parameters<Q>;
+      RequireExactlyOne<{
+        webContentsId: number;
+        windowParams: Parameters<Q>;
       }>,
   ) {
     const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:send-to`);
@@ -200,9 +211,10 @@ export class IpcRendererService<
     const ipcChannel = this.wrapChannel(
       `${IpcChannelType.External}:${channel}`,
     );
-    ipcRenderer.on(ipcChannel, listener);
+    const newListener = wrapReceiveListener<H, K>(listener);
+    ipcRenderer.on(ipcChannel, newListener);
     return () => {
-      ipcRenderer.off(ipcChannel, listener);
+      ipcRenderer.off(ipcChannel, newListener);
     };
   }
 
@@ -219,9 +231,10 @@ export class IpcRendererService<
     const ipcChannel = this.wrapChannel(
       `${IpcChannelType.External}:${channel}`,
     );
-    ipcRenderer.once(ipcChannel, listener);
+    const newListener = wrapReceiveListener<H, K>(listener);
+    ipcRenderer.once(ipcChannel, newListener);
     return () => {
-      ipcRenderer.off(ipcChannel, listener);
+      ipcRenderer.off(ipcChannel, newListener);
     };
   }
 }
@@ -249,8 +262,13 @@ export function createForInterRenderers<
 
   const useIpcRendererService = <K extends string & IpcRendererId<T>>(
     _key: K,
-  ): IpcRendererService<IpcRequests<T, K>, IpcHandles<T, K>, T['main'], Q> => {
-    return ipcRendererService;
+  ): InterRendererIpcRendererService<T, K, Q> => {
+    // One runtime instance is shared; the current renderer only specializes its public type.
+    return ipcRendererService as unknown as InterRendererIpcRendererService<
+      T,
+      K,
+      Q
+    >;
   };
 
   return useIpcRendererService;

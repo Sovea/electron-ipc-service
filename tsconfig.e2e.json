@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node", "@playwright/test"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": [
+    "playwright.config.ts",
+    "e2e/fixtures/**/*.ts",
+    "e2e/specs/**/*.ts",
+    "e2e/support/**/*.ts"
+  ]
+}
