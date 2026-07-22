@@ -2,6 +2,7 @@
   "name": "@sovea/electron-ipc-service",
   "author": "Sovea",
   "version": "0.1.0",
+  "description": "Type-safe request-response IPC services for Electron main and renderer processes.",
   "type": "module",
   "packageManager": "pnpm@11.15.1",
   "exports": {
@@ -34,7 +35,18 @@
     "test:types": "rslib build && tsc -p tsconfig.type-tests.json"
   },
   "license": "MIT",
-  "repository": "git@github.com:Sovea/electron-ipc-service.git",
+  "homepage": "https://github.com/Sovea/electron-ipc-service#readme",
+  "bugs": {
+    "url": "https://github.com/Sovea/electron-ipc-service/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sovea/electron-ipc-service.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=16.0.0"
   },

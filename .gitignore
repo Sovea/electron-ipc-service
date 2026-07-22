@@ -17,3 +17,4 @@ esm/
 .e2e-tmp/
 playwright-report/
 test-results/
+*.tgz
