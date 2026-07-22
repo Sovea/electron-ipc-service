@@ -137,7 +137,7 @@ export function App() {
 
 ## Verification
 
-Development requires Node.js 22 and pnpm 11.15.1.
+Development requires Node.js 22.13.0 or newer and pnpm 11.15.1.
 
 The E2E suite builds a clean `esm/` output, packs the real npm tarball, and
 installs it into an isolated Vite consumer before Playwright launches Electron.

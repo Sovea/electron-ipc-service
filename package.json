@@ -5,6 +5,13 @@
   "description": "Type-safe request-response IPC services for Electron main and renderer processes.",
   "type": "module",
   "packageManager": "pnpm@11.15.1",
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=22.13.0",
+      "onFail": "error"
+    }
+  },
   "exports": {
     ".": {
       "types": "./esm/index.d.ts",
@@ -48,7 +55,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": "^18.0.0 || >=20.0.0"
   },
   "dependencies": {
     "nanoid": "^5.1.5",
