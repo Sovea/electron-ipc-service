@@ -1,0 +1,151 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  CI: true
+  NODE_VERSION: 24.15.0
+  NPM_VERSION: 11.18.0
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate release metadata
+        id: release
+        shell: bash
+        env:
+          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "Release tag must start with v: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#v}"
+          base_version="${version%%-*}"
+          stable_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+          if [[ "$version" =~ $stable_pattern ]]; then
+            expected_prerelease=false
+            dist_tag=latest
+          else
+            if [[ "$base_version" == "$version" ]] ||
+               [[ ! "$base_version" =~ $stable_pattern ]]; then
+              echo "Release tag is not valid SemVer: $RELEASE_TAG" >&2
+              exit 1
+            fi
+
+            prerelease="${version#*-}"
+            prerelease_pattern='^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$'
+            if [[ ! "$prerelease" =~ $prerelease_pattern ]]; then
+              echo "Release tag has an invalid prerelease suffix: $RELEASE_TAG" >&2
+              exit 1
+            fi
+
+            IFS='.' read -ra identifiers <<< "$prerelease"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "$identifier" =~ ^[0-9]+$ ]] &&
+                 [[ ${#identifier} -gt 1 ]] &&
+                 [[ "$identifier" == 0* ]]; then
+                echo "Numeric prerelease identifiers must not have leading zeroes: $RELEASE_TAG" >&2
+                exit 1
+              fi
+            done
+
+            expected_prerelease=true
+            dist_tag=next
+          fi
+
+          if [[ "$RELEASE_IS_PRERELEASE" != "$expected_prerelease" ]]; then
+            echo "GitHub prerelease flag does not match tag $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Pin npm for trusted publishing
+        shell: bash
+        run: |
+          npm install --global "npm@$NPM_VERSION" --ignore-scripts
+          [[ "$(npm --version)" == "$NPM_VERSION" ]]
+
+      - name: Prepare package version
+        shell: bash
+        env:
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          source_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          if [[ "$DIST_TAG" == "latest" ]]; then
+            if [[ "$source_version" != "$RELEASE_VERSION" ]]; then
+              echo "Stable tag v$RELEASE_VERSION does not match package.json version $source_version" >&2
+              exit 1
+            fi
+          else
+            if [[ "$source_version" == "$RELEASE_VERSION" ]]; then
+              echo "Prerelease version $RELEASE_VERSION must not be committed to the source branch" >&2
+              exit 1
+            fi
+            npm version "$RELEASE_VERSION" --no-git-tag-version --ignore-scripts
+          fi
+
+          prepared_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          if [[ "$prepared_version" != "$RELEASE_VERSION" ]]; then
+            echo "Prepared version $prepared_version does not match release $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Verify source and package
+        run: |
+          pnpm exec tsc -p tsconfig.json --noEmit
+          pnpm run test:types
+          pnpm run test:e2e:types
+          pnpm run test:e2e:runner
+          pnpm run check:ci
+          pnpm run pack:check
+
+      - name: Publish to npm with trusted publishing
+        env:
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
+        run: npm publish --access public --tag "$DIST_TAG"

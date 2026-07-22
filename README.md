@@ -5,7 +5,7 @@ Request-Response IPC Service for Electron, enabling communication between the ma
 ## Install
 
 ```sh
-npm install @sovea/electron-ipc-service@alpha
+npm install @sovea/electron-ipc-service
 ```
 
 Electron 28.0.0 or newer is required. The package is published as native ESM.
@@ -137,7 +137,7 @@ export function App() {
 
 ## Verification
 
-Development requires Node.js 22 and pnpm 11.15.1.
+Development requires Node.js 22.13.0 or newer and pnpm 11.15.1.
 
 The E2E suite builds a clean `esm/` output, packs the real npm tarball, and
 installs it into an isolated Vite consumer before Playwright launches Electron.
@@ -146,7 +146,7 @@ This prevents tests from resolving the repository source by accident.
 ```sh
 pnpm run test:e2e          # Electron 28.0.0 minimum
 pnpm run test:e2e:current  # pinned current Electron
-pnpm run test:e2e:stress   # manual/release-tag concurrency stress suite
+pnpm run test:e2e:stress   # manual/release-PR concurrency stress suite
 pnpm run pack:check        # dry-run the npm publish manifest
 ```
 
