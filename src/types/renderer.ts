@@ -1,7 +1,7 @@
 import type { IpcRendererEvent } from 'electron';
 import type { Promisable, UnionToIntersection } from 'type-fest';
-import type { IpcRendererService } from '../core/renderer';
-import type { Fn, RequestOptions, ResponseData } from '.';
+import type { IpcRendererService } from '../core/renderer.js';
+import type { Fn, RequestOptions, ResponseData } from './index.js';
 
 /**
  * API type between renderers.
@@ -42,9 +42,9 @@ export type IpcRendererServiceListener<
  */
 export type MultiRenderersSchema<
   I extends string | number = string,
-  M extends Record<string, Fn> = any,
-  S extends Partial<Record<I, Record<string, Fn>>> = any,
-  C extends Record<string, Fn> = any,
+  M extends Record<string, Fn> = EmptyRecord,
+  S extends Partial<Record<I, Record<string, Fn>>> = EmptyRecord,
+  C extends Record<string, Fn> = EmptyRecord,
 > = {
   _type: I;
   main: M;
@@ -144,6 +144,12 @@ export type IpcSendToOptions<
   windowParams: IpcWindowParams<T, Q, K>;
 };
 
+type IpcRendererChannel<
+  T extends MultiRenderersSchema,
+  K extends IpcRendererId<T>,
+  C extends keyof IpcRendererChannels<T, K>,
+> = Extract<IpcRendererChannels<T, K>[C], Fn>;
+
 /** Safe fallback for ID-only routing, where no target schema can be selected. */
 export type IpcInvokeToUnknownOptions = UnknownRequestOptions & {
   webContentsId: number;
@@ -174,7 +180,7 @@ export type InterRendererIpcRendererService<
   >(
     channel: C,
     options: IpcInvokeToOptions<T, Q, Target, C>,
-  ): Promise<Awaited<ReturnType<IpcRendererChannels<T, Target>[C]>>>;
+  ): Promise<Awaited<ReturnType<IpcRendererChannel<T, Target, C>>>>;
   /** Keep ID-only routing safe because its target schema is unknown. */
   invokeTo<C extends IpcRequestChannels<T, K> & string>(
     channel: C,

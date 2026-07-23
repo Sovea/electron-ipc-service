@@ -4,19 +4,19 @@ import electron, {
   type WebContents,
 } from 'electron';
 import type { Promisable, RequireExactlyOne } from 'type-fest';
-import { IpcChannelType } from '../constants';
+import { IpcChannelType } from '../constants/index.js';
 import type {
   Fn,
   IpcServiceBaseOptions,
   RequestOptions,
   ResponseData,
   Unsubscribe,
-} from '../types';
-import { BaseIpcService } from './base';
+} from '../types/index.js';
+import { BaseIpcService } from './base.js';
 
 const { ipcMain, webContents } = electron;
 
-interface IpcMainServiceOptions extends IpcServiceBaseOptions {
+export interface IpcMainServiceOptions extends IpcServiceBaseOptions {
   /**
    * function to get target renderer webContentsId
    * @returns webContentsId
@@ -199,7 +199,7 @@ export class IpcMainService<
    */
   on<K extends keyof T & string>(
     channel: K,
-    listener: (event: IpcMainInvokeEvent, ...args: Parameters<T[K]>) => void,
+    listener: (event: IpcMainEvent, ...args: Parameters<T[K]>) => void,
   ): Unsubscribe {
     const ipcChannel = this.wrapChannel(
       `${IpcChannelType.External}:${channel}`,
@@ -217,7 +217,7 @@ export class IpcMainService<
    */
   once<K extends keyof T & string>(
     channel: K,
-    listener: (event: IpcMainInvokeEvent, ...args: Parameters<T[K]>) => void,
+    listener: (event: IpcMainEvent, ...args: Parameters<T[K]>) => void,
   ): Unsubscribe {
     const ipcChannel = this.wrapChannel(
       `${IpcChannelType.External}:${channel}`,

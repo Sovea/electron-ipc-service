@@ -10,8 +10,8 @@ export default defineConfig({
       output: {
         distPath: {
           root: './esm',
-        }
-      }
+        },
+      },
     },
   ],
 });
