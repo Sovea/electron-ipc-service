@@ -1,6 +1,7 @@
-# Electron Ipc Service
+# Electron IPC Service
 
-Request-Response IPC Service for Electron, enabling communication between the main and renderer processes, and **also among renderer processes**.
+Type-safe request-response IPC for Electron main and renderer processes, with
+optional routing between renderer processes.
 
 ## Install
 
@@ -10,155 +11,166 @@ npm install @sovea/electron-ipc-service
 
 Electron 28.0.0 or newer is required. The package is published as native ESM.
 
-## Usage
+## Main and renderer
 
-### Classic Ipc Between Main and Renderer
-
-Create IpcMainService:
+Define the channels shared by the main process and preload:
 
 ```typescript
-import { IpcMainService } from "@sovea/electron-ipc-service";
+// ipc-schema.ts
+export type MainIpc = {
+  ping: (message: string) => string;
+};
+```
 
-export type IpcSchema = {
-  ping: (msg: string) => boolean;
+Register handlers in the main process:
+
+```typescript
+// main.ts
+import { IpcMainService } from '@sovea/electron-ipc-service';
+import type { MainIpc } from './ipc-schema.js';
+
+const ipc = new IpcMainService<MainIpc>();
+
+const removePingHandler = ipc.handle('ping', (event, message) => {
+  // Validate event.senderFrame before performing privileged work.
+  return `pong:${message}`;
+});
+
+// Dispose application handlers explicitly, then stop internal routing.
+function disposeIpc() {
+  removePingHandler();
+  ipc.destroy();
+}
+```
+
+Create the renderer service in a preload script and expose only application
+operations:
+
+```typescript
+// preload.ts
+import { contextBridge } from 'electron';
+import { create } from '@sovea/electron-ipc-service/renderer';
+import type { MainIpc } from './ipc-schema.js';
+
+const ipc = create<MainIpc>();
+
+export type AppApi = {
+  ping(message: string): Promise<string>;
 };
 
-export const ipcMainService = new IpcMainService<IpcSchema>();
+const appApi: AppApi = {
+  ping: (message) => ipc.invoke('ping', { data: [message] }),
+};
 
-ipcMainService.handle("ping", (event, msg) => {
-  return true;
+contextBridge.exposeInMainWorld('appApi', appApi);
+```
+
+The page calls the narrow API instead of receiving the IPC service itself:
+
+```typescript
+const response = await window.appApi.ping('hello');
+```
+
+Add `AppApi` to the page's `Window` type in your application.
+
+## Renderer-to-renderer routing
+
+Configure the main service with a function that resolves an application window
+identifier to a `webContentsId`:
+
+```typescript
+type WindowId = 'main' | 'settings';
+
+const ipc = new IpcMainService<MainIpc>({
+  getWebContentsId: (windowId: WindowId) =>
+    windowManager.getWebContentsId(windowId),
 });
 ```
 
-Create IpcRendererService:
-
-```typescript
-import { create } from "@sovea/electron-ipc-service/renderer";
-
-export const ipcRendererService = create<IpcSchema>();
-
-ipcRendererService.invoke("ping", "I am renderer.");
-```
-
-### Ipc among renderer processes (multiple windows)
-
-Create IpcMainService with getWebContentsId function (function to get target renderer webContentsId).
-
-```typescript
-import { IpcMainService } from "@sovea/electron-ipc-service";
-
-export type IpcSchema = {};
-
-export const ipcMainService = new IpcMainService<IpcSchema>({
-  getWebContentsId: (type: string) => {
-    // any window manager
-    return windowManager.getWebContentsId(type);
-  },
-});
-```
-
-Create IpcRendererService with MultiRenderersSchema.
+Describe the channels handled by each renderer and create one typed service per
+preload:
 
 ```typescript
 import {
   createForInterRenderers,
-  MultiRenderersSchema,
-} from "@sovea/electron-ipc-service/renderer";
+  type MultiRenderersSchema,
+} from '@sovea/electron-ipc-service/renderer';
 
-// Renderer unique identifier type
-type WindowType = "main" | "sub";
-
-type IpcSchemaBetweenMainAndRenderer = {
-  ping: (msg: string) => boolean;
-};
-
-export type IpcAmongRenderersSchema = MultiRenderersSchema<
-  WindowType,
-  IpcSchemaBetweenMainAndRenderer,
+type WindowId = 'main' | 'settings';
+type RendererIpc = MultiRenderersSchema<
+  WindowId,
+  MainIpc,
   {
-    main: {
-      testMain: (msg: string) => number;
+    main: Record<never, never>;
+    settings: {
+      readSettings: () => string;
     };
-    sub: {
-      testSub: (msg: number) => boolean;
-    };
-  },
-  {
-    testCommon: () => number;
   }
 >;
+type GetWebContentsId = (windowId: WindowId) => number | undefined;
 
-export const useIpcRendererService = createForInterRenderers<
-  IpcAmongRenderersSchema,
-  (type: WindowType) => number
->();
+const getIpc = createForInterRenderers<RendererIpc, GetWebContentsId>();
+
+const mainIpc = getIpc('main');
+const settings = await mainIpc.invokeTo('readSettings', {
+  windowParams: ['settings'],
+});
+
+const settingsIpc = getIpc('settings');
+const removeHandler = settingsIpc.handle('readSettings', () => {
+  return JSON.stringify({ theme: 'system' });
+});
 ```
 
-Use ipc renderer service in main window:
+Expose application-specific wrappers through `contextBridge`; do not expose
+`mainIpc`, `settingsIpc`, or Electron's `ipcRenderer` directly to a page.
 
-```typescript
-import React, { useEffect } from "react";
-import { useIpcRendererService } from "../ipc-service";
+`invokeTo()` and `sendTo()` require exactly one target:
 
-const ipcRendererService = useIpcRendererService("main");
+- `windowParams` uses `getWebContentsId` and preserves target-specific types.
+- `webContentsId` routes directly, so its result and payload types are
+  intentionally unknown.
 
-export function App() {
-  useEffect(() => {
-    ipcRendererService
-      .invokeTo("testSub", { data: [1], windowParams: ["sub"] })
-      .then((res) => {
-        console.log("invoke testSub: ", res);
-      });
-  }, []);
+## API notes
 
-  return <div>main</div>;
-}
-```
+- `send()` sends a one-way message to the main process.
+- `invoke()` calls a main-process handler and returns its result.
+- `sendTo()` and `invokeTo()` route through the main process to another
+  renderer.
+- `on()`, `once()`, `handle()`, `handleOnce()`, `receive()`, and
+  `receiveOnce()` return an unsubscribe function.
+- `IpcMainService.destroy()` rejects pending renderer-to-renderer requests and
+  removes internal routing handlers. Application handlers must be removed with
+  their unsubscribe functions.
+- Renderer-to-renderer requests default to a 5-second pending-request timeout.
+  A positive `timeout` option overrides it for an individual request.
 
-Use ipc renderer service in sub window:
+## Security
 
-```typescript
-import React, { useEffect } from "react";
-import { useIpcRendererService } from "../ipc-service";
+This package provides compile-time types, not runtime validation or
+authorization.
 
-const ipcRendererService = useIpcRendererService("sub");
+- Create renderer services in trusted preload code.
+- Keep `contextIsolation` enabled and `nodeIntegration` disabled.
+- Expose narrow application operations through `contextBridge`.
+- Validate IPC payloads at runtime and authorize privileged main-process work.
+- Validate the sender of incoming IPC messages.
+- Do not treat channel names or `ipcChannelPrefix` as a security boundary.
 
-export function App() {
-  useEffect(() => {
-    ipcRendererService.handle("testSub", (_event, data) => {
-      console.log("handle testSub", data);
-      return true;
-    });
-  }, []);
+See Electron's
+[security checklist](https://www.electronjs.org/docs/latest/tutorial/security)
+for the complete application-level guidance.
 
-  return <div>sub</div>;
-}
-```
+## Compatibility
 
-## Verification
+- Electron: `>=28.0.0`
+- Tested Electron versions: `28.0.0` and `43.1.1`
+- Node.js package consumers: `^18.0.0 || >=20.0.0`
+- Module format: native ESM; CommonJS callers must use dynamic `import()`
 
-Development requires Node.js 22.13.0 or newer and pnpm 11.15.1.
+Development setup and verification commands are documented in
+[CONTRIBUTING.md](https://github.com/Sovea/electron-ipc-service/blob/main/CONTRIBUTING.md).
 
-The E2E suite builds a clean `esm/` output, packs the real npm tarball, and
-installs it into an isolated Vite consumer before Playwright launches Electron.
-This prevents tests from resolving the repository source by accident.
+## License
 
-```sh
-pnpm run test:e2e          # Electron 28.0.0 minimum
-pnpm run test:e2e:current  # pinned current Electron
-pnpm run test:e2e:stress   # manual/release-PR concurrency stress suite
-pnpm run pack:check        # dry-run the npm publish manifest
-```
-
-On Debian/Ubuntu Linux:
-
-```sh
-pnpm run test:e2e:install-deps
-xvfb-run -a pnpm run test:e2e
-```
-
-Failed runs preserve the temporary consumer and write diagnostics to
-`test-results/e2e-setup.json`.
-
-Use `pnpm run test:types` for the public declaration contract and
-`pnpm run check:ci` for a read-only Biome check.
+[MIT](./LICENSE)

@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid';
-import type { IpcServiceBaseOptions } from '../types';
+import type { IpcServiceBaseOptions } from '../types/index.js';
 
 export class BaseIpcService {
   protected options: IpcServiceBaseOptions;

@@ -45,7 +45,7 @@ jobs:
       - run: pnpm run test:types
       - run: pnpm run test:e2e:types
       - run: pnpm run test:e2e:runner
-      - run: pnpm run pack:check
+      - run: pnpm run test:package
       - run: pnpm run check:ci
 
   e2e-pr:

@@ -143,8 +143,26 @@ async function assertInstalledPackage() {
       'Packed manifest is missing the type-fest runtime dependency',
     );
   }
-  if (!manifest.exports?.['.'] || !manifest.exports?.['./*']) {
-    throw new Error('Packed manifest is missing a public package entry');
+  const expectedExports = {
+    '.': {
+      types: './esm/index.d.ts',
+      import: './esm/index.js',
+    },
+    './renderer': {
+      types: './esm/renderer.d.ts',
+      import: './esm/renderer.js',
+    },
+  };
+  if (
+    Object.keys(manifest.exports ?? {}).length !==
+      Object.keys(expectedExports).length ||
+    Object.entries(expectedExports).some(
+      ([entry, conditions]) =>
+        manifest.exports?.[entry]?.types !== conditions.types ||
+        manifest.exports?.[entry]?.import !== conditions.import,
+    )
+  ) {
+    throw new Error('Packed manifest does not expose the expected public API');
   }
 
   await Promise.all([

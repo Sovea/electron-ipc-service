@@ -142,8 +142,8 @@ jobs:
           pnpm run test:types
           pnpm run test:e2e:types
           pnpm run test:e2e:runner
+          pnpm run test:package
           pnpm run check:ci
-          pnpm run pack:check
 
       - name: Publish to npm with trusted publishing
         env:

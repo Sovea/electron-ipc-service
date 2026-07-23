@@ -1,16 +1,21 @@
 import electron, { type IpcRendererEvent } from 'electron';
 import type { RequireExactlyOne } from 'type-fest';
-import { IpcChannelType } from '../constants';
-import type { Fn, Optional, RequestOptions, Unsubscribe } from '../types';
+import { IpcChannelType } from '../constants/index.js';
+import type {
+  Fn,
+  Optional,
+  RequestOptions,
+  Unsubscribe,
+} from '../types/index.js';
 import type {
   APIBetweenRenderers,
   InterRendererIpcRendererService,
   IpcRendererId,
   IpcRendererServiceListener,
   MultiRenderersSchema,
-} from '../types/renderer';
-import { processFunction } from '../utils/fn';
-import { BaseIpcService } from './base';
+} from '../types/renderer.js';
+import { processFunction } from '../utils/fn.js';
+import { BaseIpcService } from './base.js';
 
 const { ipcRenderer } = electron;
 
