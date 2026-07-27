@@ -19,7 +19,6 @@ const readyRenderers = new Set<RendererId>();
 const mainEvents: Array<{ channel: string; value: string }> = [];
 
 let service: IpcMainService<MainSchema> | undefined;
-let fixedDisposers: Array<() => void> = [];
 let mainEventDisposer: (() => void) | undefined;
 let removableDisposer: (() => void) | undefined;
 let removableGeneration = 1;
@@ -41,7 +40,7 @@ function getWebContentsId(rendererId: RendererId, queryWorkspaceId: string) {
 }
 
 function installRemovableHandler() {
-  removableDisposer = service?.handle('removableMain', (_event, value) => {
+  removableDisposer = service?.handle('removableMain', (_context, value) => {
     return `handler-${removableGeneration}:${value}`;
   });
 }
@@ -50,43 +49,40 @@ function installService() {
   service = new IpcMainService<MainSchema>({
     getWebContentsId,
     ipcChannelPrefix: channelPrefix,
-    pendingRequestTimeout: 300,
+    requestTimeout: 300,
   });
 
-  mainEventDisposer = service.on('mainEvent', (_event, value) => {
+  mainEventDisposer = service.on('mainEvent', (_context, value) => {
     mainEvents.push({ channel: 'mainEvent', value });
   });
-  fixedDisposers = [
-    service.once('mainOnceEvent', (_event, value) => {
-      mainEvents.push({ channel: 'mainOnceEvent', value });
-    }),
-    service.handle('echoMain', (_event, value) => value),
-    service.handle('asyncMain', async (_event, value) => value * 2),
-    service.handle('throwMain', (_event, message) => {
-      throw new Error(message);
-    }),
-    service.handle('waitMain', () => new Promise<string>(() => {})),
-    service.handleOnce('onceMain', (_event, value) => `once:${value}`),
-  ];
+  service.once('mainOnceEvent', (_context, value) => {
+    mainEvents.push({ channel: 'mainOnceEvent', value });
+  });
+  service.handle('echoMain', (_context, value) => value);
+  service.handle('asyncMain', async (_context, value) => value * 2);
+  service.handle('throwMain', (_context, message) => {
+    throw new Error(message);
+  });
+  service.handle('waitMain', () => new Promise<string>(() => {}));
+  service.handleOnce('onceMain', (_event, value) => `once:${value}`);
+  service.handle('sameChannel', (_context, value) => `request:${value}`);
+  service.on('sameChannel', (_context, value) => {
+    mainEvents.push({ channel: 'sameChannel', value });
+  });
+  service.on('throwMainEvent', async () => {
+    await Promise.resolve();
+    throw new Error('main-event-boom');
+  });
   installRemovableHandler();
 }
 
-function disposeExternalHandlers() {
-  mainEventDisposer?.();
-  mainEventDisposer = undefined;
-  removableDisposer?.();
-  removableDisposer = undefined;
-  for (const dispose of fixedDisposers.splice(0)) {
-    dispose();
-  }
-}
-
 function destroyService() {
-  disposeExternalHandlers();
   const currentService = service;
   currentService?.destroy();
   currentService?.destroy();
   service = undefined;
+  mainEventDisposer = undefined;
+  removableDisposer = undefined;
 }
 
 function createWindow(rendererId: RendererId) {
@@ -155,9 +151,13 @@ async function handleControl(
       mainEventDisposer = undefined;
       return true;
     case 'replace-removable-handler':
-      removableDisposer?.();
-      removableGeneration += 1;
-      installRemovableHandler();
+      {
+        const staleDisposer = removableDisposer;
+        staleDisposer?.();
+        removableGeneration += 1;
+        installRemovableHandler();
+        staleDisposer?.();
+      }
       return removableGeneration;
     case 'destroy-service':
       destroyService();

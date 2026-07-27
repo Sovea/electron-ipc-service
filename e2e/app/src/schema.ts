@@ -6,14 +6,21 @@ export const ipcChannelPrefix = 'ipc-service:';
 export type RendererId = (typeof rendererIds)[number];
 
 export type MainSchema = {
-  mainEvent: (value: string) => void;
-  mainOnceEvent: (value: string) => void;
-  echoMain: (value: string) => string;
-  asyncMain: (value: number) => Promise<number>;
-  throwMain: (message: string) => never;
-  waitMain: () => Promise<string>;
-  onceMain: (value: string) => string;
-  removableMain: (value: string) => string;
+  requests: {
+    echoMain: (value: string) => string;
+    asyncMain: (value: number) => Promise<number>;
+    throwMain: (message: string) => never;
+    waitMain: () => Promise<string>;
+    onceMain: (value: string) => string;
+    removableMain: (value: string) => string;
+    sameChannel: (value: string) => string;
+  };
+  events: {
+    mainEvent: (value: string) => void;
+    mainOnceEvent: (value: string) => void;
+    sameChannel: (value: string) => void;
+    throwMainEvent: () => void;
+  };
 };
 
 export type RendererSchema = MultiRenderersSchema<
@@ -21,27 +28,43 @@ export type RendererSchema = MultiRenderersSchema<
   MainSchema,
   {
     main: {
-      duplicate: (value: string) => string;
-      mainOnly: () => string;
+      requests: {
+        duplicate: (value: string) => string;
+        mainOnly: () => string;
+      };
+      events: Record<never, never>;
     };
     sub: {
-      duplicate: (value: number) => number;
-      subOnly: (enabled: boolean) => boolean;
-      throwRenderer: (message: string) => never;
-      waitRenderer: () => Promise<string>;
-      outOfOrder: (index: number, delay: number) => { index: number };
-      receiveMessage: (value: string) => void;
-      receiveOnceMessage: (value: string) => void;
-      unsubscribedMessage: (value: string) => void;
+      requests: {
+        duplicate: (value: number) => number;
+        subOnly: (enabled: boolean) => boolean;
+        throwRenderer: (message: string) => never;
+        unserializable: () => unknown;
+        waitRenderer: () => Promise<string>;
+        outOfOrder: (index: number, delay: number) => { index: number };
+      };
+      events: {
+        receiveMessage: (value: string) => void;
+        receiveOnceMessage: (value: string) => void;
+        throwRendererEvent: () => void;
+        unsubscribedMessage: (value: string) => void;
+      };
     };
     other: {
-      duplicate: (value: boolean) => boolean;
-      otherOnly: (name: string) => string;
+      requests: {
+        duplicate: (value: boolean) => boolean;
+        otherOnly: (name: string) => string;
+      };
+      events: Record<never, never>;
     };
   },
   {
-    common: (value: string) => string;
-    commonMessage: (value: string) => void;
+    requests: {
+      common: (value: string) => string;
+    };
+    events: {
+      commonMessage: (value: string) => void;
+    };
   }
 >;
 
@@ -55,6 +78,13 @@ export type DriverEvent = {
   channel: string;
   data?: unknown;
   sourceId?: number;
+};
+
+export type DriverError = {
+  name: string;
+  message: string;
+  code?: string;
+  remoteCode?: string;
 };
 
 // Keep the driver permissive so E2E can exercise invalid wire-level input.
@@ -73,10 +103,18 @@ export interface E2EDriver {
     data?: unknown[],
     timeout?: number,
   ): Promise<unknown>;
+  invokeMainError(
+    channel: string,
+    data?: unknown[],
+    timeout?: number,
+  ): Promise<DriverError>;
   sendMain(channel: string, data?: unknown[]): void;
   invokeTo(channel: string, options: TargetOptions): Promise<unknown>;
+  invokeToError(channel: string, options: TargetOptions): Promise<DriverError>;
+  forgeReply(requestId: string, value: unknown): void;
   sendTo(channel: string, options: Omit<TargetOptions, 'timeout'>): void;
   getEvents(): DriverEvent[];
   clearEvents(): void;
   control<T>(command: string, payload?: unknown): Promise<T>;
+  localControl<T>(command: string, payload?: unknown): T | Promise<T>;
 }

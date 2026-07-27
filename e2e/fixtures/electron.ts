@@ -21,6 +21,7 @@ export type ElectronHarness = {
   workspaceId: string;
   page(rendererId: RendererId): Page;
   consumeMainError(pattern: RegExp): boolean;
+  consumeRendererWarning(pattern: RegExp): boolean;
   consumeWarning(pattern: RegExp): boolean;
 };
 
@@ -133,6 +134,7 @@ export const test = base.extend<Fixtures>({
 
       const logs: string[] = [];
       const mainErrors: string[] = [];
+      const rendererWarnings: string[] = [];
       const warnings: string[] = [];
       const failures: string[] = [];
       const attachedPages = new WeakSet<Page>();
@@ -221,7 +223,9 @@ export const test = base.extend<Fixtures>({
         page.on('console', (message) => {
           const line = `[renderer:${message.type()}] ${message.text()}`;
           logs.push(line);
-          if (message.type() === 'error' || message.type() === 'warning') {
+          if (message.type() === 'warning') {
+            rendererWarnings.push(message.text());
+          } else if (message.type() === 'error') {
             failures.push(line);
           }
         });
@@ -303,6 +307,16 @@ export const test = base.extend<Fixtures>({
             mainErrors.splice(index, 1);
             return true;
           },
+          consumeRendererWarning(pattern) {
+            const index = rendererWarnings.findIndex((warning) =>
+              pattern.test(warning),
+            );
+            if (index < 0) {
+              return false;
+            }
+            rendererWarnings.splice(index, 1);
+            return true;
+          },
           consumeWarning(pattern) {
             const index = warnings.findIndex((warning) =>
               pattern.test(warning),
@@ -324,6 +338,7 @@ export const test = base.extend<Fixtures>({
         setupError !== undefined ||
         testInfo.status !== testInfo.expectedStatus ||
         failures.length > 0 ||
+        rendererWarnings.length > 0 ||
         warnings.length > 0 ||
         mainErrors.length > 0;
       if (shouldCaptureScreenshots) {
@@ -382,6 +397,11 @@ export const test = base.extend<Fixtures>({
 
       if (warnings.length > 0) {
         failures.push(`Unconsumed main warnings:\n${warnings.join('\n')}`);
+      }
+      if (rendererWarnings.length > 0) {
+        failures.push(
+          `Unconsumed renderer warnings:\n${rendererWarnings.join('\n')}`,
+        );
       }
       if (mainErrors.length > 0) {
         failures.push(`Unconsumed main errors:\n${mainErrors.join('\n')}`);
