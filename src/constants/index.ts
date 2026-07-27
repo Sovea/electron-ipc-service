@@ -1,5 +1,6 @@
 /** ipc channel type */
 export const IpcChannelType = {
   Internal: 'internal',
-  External: 'external',
+  Request: 'external:request',
+  Event: 'external:event',
 } as const;

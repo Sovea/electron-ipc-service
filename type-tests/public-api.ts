@@ -1,7 +1,12 @@
 import {
+  type IpcError,
+  IpcErrorCode,
+  type IpcErrorCode as IpcErrorCodeType,
   IpcMainService,
   type IpcMainServiceOptions,
   type IpcServiceBaseOptions,
+  type MainEventContext,
+  type MainRequestContext,
   type RequestOptions,
   type Unsubscribe,
 } from '@sovea/electron-ipc-service';
@@ -9,38 +14,99 @@ import {
   create,
   createForInterRenderers,
   type InterRendererIpcRendererService,
-  type IpcRendererServiceListener,
+  type IpcRendererRequestHandler,
   type MultiRenderersSchema,
+  type RendererRequestContext,
 } from '@sovea/electron-ipc-service/renderer';
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
 type MainSchema = {
-  notify: (message: string) => void;
-  ping: (message: string) => string;
+  requests: {
+    ping: (message: string) => string;
+  };
+  events: {
+    notify: (message: string) => void;
+  };
 };
+
+interface InterfaceRequests {
+  interfacePing: (message: string) => Promise<string>;
+}
+
+interface InterfaceEvents {
+  interfaceNotify: (message: string) => void;
+}
+
+interface InterfaceSchema {
+  requests: InterfaceRequests;
+  events: InterfaceEvents;
+}
+
+interface InvalidSchema {
+  requests: {
+    invalid: string;
+  };
+  events: InterfaceEvents;
+}
 
 const mainOptions = {
   ipcChannelPrefix: 'app:',
-  pendingRequestTimeout: 1_000,
+  requestTimeout: 1_000,
   getWebContentsId: (_windowType: string) => 1,
+  onError(error) {
+    error satisfies IpcError;
+  },
 } satisfies IpcMainServiceOptions;
 
 const baseOptions: IpcServiceBaseOptions = mainOptions;
 void baseOptions;
 
+const asyncErrorOptions: IpcServiceBaseOptions = {
+  async onError(_error) {
+    await Promise.resolve();
+  },
+};
+void asyncErrorOptions;
+
 const mainService = new IpcMainService<MainSchema>(mainOptions);
-const removeNotify: Unsubscribe = mainService.on('notify', (event, message) => {
-  const mainEvent: IpcMainEvent = event;
-  void mainEvent;
-  void message;
-});
+const removeNotify: Unsubscribe = mainService.on(
+  'notify',
+  (context, message) => {
+    context satisfies MainEventContext;
+    context.channel satisfies 'notify';
+    const mainEvent: IpcMainEvent = context.event;
+    void mainEvent;
+    void message;
+  },
+);
 removeNotify();
 
-mainService.handle('ping', (event, message) => {
-  const invokeEvent: IpcMainInvokeEvent = event;
+mainService.handle('ping', (context, message) => {
+  context satisfies MainRequestContext;
+  context.channel satisfies 'ping';
+  const invokeEvent: IpcMainInvokeEvent = context.event;
   void invokeEvent;
   return `pong:${message}`;
 });
+
+// @ts-expect-error events cannot be registered as request handlers
+mainService.handle('notify', () => undefined);
+
+// @ts-expect-error requests cannot be registered as events
+mainService.on('ping', () => undefined);
+
+const interfaceMainService = new IpcMainService<InterfaceSchema>();
+interfaceMainService.handle('interfacePing', (context, message) => {
+  context.channel satisfies 'interfacePing';
+  return Promise.resolve(message);
+});
+interfaceMainService.on('interfaceNotify', (context, message) => {
+  context.channel satisfies 'interfaceNotify';
+  void message;
+});
+
+// @ts-expect-error schema members must be functions
+new IpcMainService<InvalidSchema>();
 
 const rendererService = create<MainSchema>();
 rendererService.send('notify', 'hello');
@@ -50,13 +116,25 @@ const response = rendererService.invoke('ping', {
 });
 response satisfies Promise<string>;
 
-const pingOptions: RequestOptions<MainSchema, 'ping'> = {
+const interfaceRendererService = create<InterfaceSchema>();
+interfaceRendererService.send('interfaceNotify', 'value');
+interfaceRendererService.invoke('interfacePing', {
+  data: ['value'],
+});
+
+// @ts-expect-error schema members must be functions
+create<InvalidSchema>();
+
+// @ts-expect-error requests cannot be sent
+rendererService.send('ping', 'hello');
+
+// @ts-expect-error events cannot be invoked
+rendererService.invoke('notify', { data: ['hello'] });
+
+const pingOptions: RequestOptions<MainSchema['requests'], 'ping'> = {
   data: ['hello'],
 };
 void pingOptions;
-
-// @ts-expect-error invoke expects RequestOptions, not positional arguments
-rendererService.invoke('ping', 'hello');
 
 type RendererId = 'main' | 'settings';
 type RendererSchema = MultiRenderersSchema<
@@ -64,10 +142,16 @@ type RendererSchema = MultiRenderersSchema<
   MainSchema,
   {
     main: {
-      refresh: () => void;
+      requests: Record<never, never>;
+      events: {
+        refresh: () => void;
+      };
     };
     settings: {
-      readSettings: () => string;
+      requests: {
+        readSettings: () => string;
+      };
+      events: Record<never, never>;
     };
   }
 >;
@@ -89,12 +173,26 @@ type NamedService = InterRendererIpcRendererService<
 >;
 typedRendererService satisfies NamedService;
 
-type SettingsListener = IpcRendererServiceListener<
+const settingsService = getRendererService('settings');
+settingsService.handle('readSettings', (context) => {
+  context.channel satisfies 'readSettings';
+  context.source.webContentsId satisfies number;
+  return 'settings';
+});
+
+type SettingsHandler = IpcRendererRequestHandler<
   { readSettings: () => string },
   'readSettings'
 >;
-declare const settingsListener: SettingsListener;
-void settingsListener;
+declare const settingsHandler: SettingsHandler;
+declare const rendererContext: RendererRequestContext;
+void settingsHandler;
+void rendererContext;
+
+const code = IpcErrorCode.Timeout;
+code satisfies 'IPC_TIMEOUT';
+const typedCode: IpcErrorCodeType = code;
+void typedCode;
 
 // @ts-expect-error renderer values are only exported from the renderer entry
 import { create as createFromRoot } from '@sovea/electron-ipc-service';

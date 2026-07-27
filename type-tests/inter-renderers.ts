@@ -17,25 +17,49 @@ type RendererId = 'main' | 'sub' | 'other';
 type Schema = MultiRenderersSchema<
   RendererId,
   {
-    mainRequest: (value: string) => number;
+    requests: {
+      mainRequest: (value: string) => number;
+    };
+    events: {
+      mainEvent: (value: string) => void;
+    };
   },
   {
     main: {
-      getInfo: (value: string) => 'main-result';
-      mainOnly: () => void;
+      requests: {
+        getInfo: (value: string) => 'main-result';
+        mainOnly: () => void;
+      };
+      events: {
+        mainNotice: (value: string) => void;
+      };
     };
     sub: {
-      getInfo: (value: number) => 'sub-result';
-      subOnly: (enabled: boolean) => number;
+      requests: {
+        getInfo: (value: number) => 'sub-result';
+        subOnly: (enabled: boolean) => number;
+      };
+      events: {
+        subNotice: (value: number) => void;
+      };
     };
     other: {
-      getInfo: (value: boolean) => Promise<'other-result'>;
-      otherOnly: (name: string) => boolean;
+      requests: {
+        getInfo: (value: boolean) => Promise<'other-result'>;
+        otherOnly: (name: string) => boolean;
+      };
+      events: {
+        otherNotice: (value: boolean) => void;
+      };
     };
   },
   {
-    ping: () => 'pong';
-    commonWithArgument: (value: string) => number;
+    requests: {
+      ping: () => 'pong';
+    };
+    events: {
+      commonNotice: (value: string) => void;
+    };
   }
 >;
 
@@ -50,7 +74,6 @@ const useIpcRendererService = createForInterRenderers<
 >();
 const mainService = useIpcRendererService('main');
 
-// Duplicate channel names retain the signature of the selected renderer.
 const subResult = mainService.invokeTo('getInfo', {
   windowParams: ['sub', 'workspace'],
   data: [1],
@@ -65,8 +88,7 @@ export type OtherResult = Expect<
   Equal<typeof otherResult, Promise<'other-result'>>
 >;
 
-// Target selectors are mutually exclusive, even when they identify the same renderer.
-// @ts-expect-error webContentsId and windowParams cannot be supplied together
+// @ts-expect-error target selectors are mutually exclusive
 mainService.invokeTo('getInfo', {
   webContentsId: 1,
   windowParams: ['sub', 'workspace'],
@@ -78,7 +100,6 @@ mainService.invokeTo('getInfo', {
   data: [1],
 });
 
-// Shared and target-unique channels retain their own return types.
 const commonResult = mainService.invokeTo('ping', {
   windowParams: ['sub', 'workspace'],
 });
@@ -90,17 +111,15 @@ const uniqueResult = mainService.invokeTo('subOnly', {
 });
 export type UniqueResult = Expect<Equal<typeof uniqueResult, Promise<number>>>;
 
-// sendTo uses the same target-specific argument inference.
-mainService.sendTo('getInfo', {
+mainService.sendTo('otherNotice', {
   windowParams: ['other', 'workspace'],
   data: [true],
 });
-mainService.sendTo('commonWithArgument', {
+mainService.sendTo('commonNotice', {
   windowParams: ['sub', 'workspace'],
   data: ['value'],
 });
 
-// A webContentsId alone cannot identify a target schema at compile time.
 const unknownResult = mainService.invokeTo('getInfo', {
   webContentsId: 1,
   data: [{ callerSpecifiedTarget: true }],
@@ -109,25 +128,24 @@ export type UnknownResult = Expect<
   Equal<typeof unknownResult, Promise<unknown>>
 >;
 
-mainService.sendTo('getInfo', {
+mainService.sendTo('subNotice', {
   webContentsId: 1,
   data: [{ callerSpecifiedTarget: true }],
 });
 
-// @ts-expect-error sendTo target selectors are mutually exclusive
+// @ts-expect-error requests cannot be sent as events
 mainService.sendTo('getInfo', {
-  webContentsId: 1,
   windowParams: ['sub', 'workspace'],
   data: [1],
 });
 
-// @ts-expect-error sendTo also requires exactly one target selector
-mainService.sendTo('getInfo', {
+// @ts-expect-error events cannot be invoked
+mainService.invokeTo('subNotice', {
+  windowParams: ['sub', 'workspace'],
   data: [1],
 });
 
-// Invalid target-aware calls must remain compile-time errors.
-// @ts-expect-error sub.getInfo accepts a number, not a boolean
+// @ts-expect-error sub.getInfo accepts a number
 mainService.invokeTo('getInfo', {
   windowParams: ['sub', 'workspace'],
   data: [true],
@@ -140,7 +158,7 @@ mainService.invokeTo('getInfo', {
 });
 
 mainService.invokeTo('getInfo', {
-  // @ts-expect-error getWebContentsId requires the workspace id
+  // @ts-expect-error resolver requires the workspace id
   windowParams: ['sub'],
   data: [1],
 });
@@ -151,38 +169,109 @@ mainService.invokeTo('getInfo', {
   data: [1],
 });
 
-// @ts-expect-error the channel does not exist in any target renderer
+// @ts-expect-error unknown request channel
 mainService.invokeTo('missing', {
   webContentsId: 1,
 });
 
-// @ts-expect-error sendTo options do not accept a timeout
-mainService.sendTo('getInfo', {
+// @ts-expect-error sendTo does not accept timeout
+mainService.sendTo('subNotice', {
   windowParams: ['sub', 'workspace'],
   data: [1],
   timeout: 100,
 });
 
-// The base service preserves return inference for a known request map.
-type DirectRequests = {
-  unique: (id: string) => Promise<number>;
+type DirectRendererEndpoint = {
+  requests: {
+    unique: (id: string) => Promise<number>;
+  };
+  events: {
+    changed: (id: string) => void;
+  };
 };
 
-declare const directService: IpcRendererService<DirectRequests>;
+declare const directService: IpcRendererService<DirectRendererEndpoint>;
 const directResult = directService.invokeTo('unique', {
   webContentsId: 1,
   data: ['id'],
 });
 export type DirectResult = Expect<Equal<typeof directResult, Promise<number>>>;
 
-// @ts-expect-error the base service also rejects two target selectors
-directService.invokeTo('unique', {
+directService.sendTo('changed', {
   webContentsId: 1,
-  windowParams: ['sub', 'workspace'],
   data: ['id'],
 });
 
-// @ts-expect-error the base service sendTo requires exactly one selector
-directService.sendTo('unique', {
+// @ts-expect-error direct event is not invokable
+directService.invokeTo('changed', {
+  webContentsId: 1,
   data: ['id'],
 });
+
+type EmptyRequests = Record<never, never>;
+
+type EmptyEvents = Record<never, never>;
+
+interface EmptyEndpoint {
+  requests: EmptyRequests;
+  events: EmptyEvents;
+}
+
+interface StringRendererRequests {
+  textRequest: (value: string) => 'text-result';
+}
+
+interface StringRendererEndpoint {
+  requests: StringRendererRequests;
+  events: EmptyEvents;
+}
+
+interface NumericRendererRequests {
+  numericRequest: (value: number) => number;
+}
+
+interface NumericRendererEndpoint {
+  requests: NumericRendererRequests;
+  events: EmptyEvents;
+}
+
+type MixedRendererId = 'main' | 2;
+type MixedRendererSchema = MultiRenderersSchema<
+  MixedRendererId,
+  EmptyEndpoint,
+  {
+    main: StringRendererEndpoint;
+    2: NumericRendererEndpoint;
+  },
+  EmptyEndpoint
+>;
+type GetMixedWebContentsId = (
+  rendererId: MixedRendererId,
+  workspaceId: string,
+) => number | undefined;
+
+const useMixedRenderer = createForInterRenderers<
+  MixedRendererSchema,
+  GetMixedWebContentsId
+>();
+const stringRenderer = useMixedRenderer('main');
+const numericRenderer = useMixedRenderer(2);
+
+const numericResult = stringRenderer.invokeTo('numericRequest', {
+  data: [2],
+  windowParams: [2, 'workspace'],
+});
+export type NumericResult = Expect<
+  Equal<typeof numericResult, Promise<number>>
+>;
+
+const textResult = numericRenderer.invokeTo('textRequest', {
+  data: ['value'],
+  windowParams: ['main', 'workspace'],
+});
+export type TextResult = Expect<
+  Equal<typeof textResult, Promise<'text-result'>>
+>;
+
+// @ts-expect-error renderer ids are limited to the declared string | number union
+useMixedRenderer(3);

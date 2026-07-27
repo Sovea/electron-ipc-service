@@ -1,9 +1,11 @@
 import {
   create,
   createForInterRenderers,
+  IpcRendererService,
 } from '@sovea/electron-ipc-service/renderer';
 import electron from 'electron';
 import type {
+  DriverError,
   DriverEvent,
   E2EDriver,
   GetWebContentsId,
@@ -47,8 +49,18 @@ if (!workspaceId) {
 }
 
 const events: DriverEvent[] = [];
+const reportedErrors: DriverError[] = [];
+let rejectReportedErrors = false;
 const mainService = create<MainSchema>();
-const useService = createForInterRenderers<RendererSchema, GetWebContentsId>();
+const useService = createForInterRenderers<RendererSchema, GetWebContentsId>({
+  async onError(error) {
+    reportedErrors.push(describeError(error));
+    await Promise.resolve();
+    if (rejectReportedErrors) {
+      throw new Error('e2e-on-error-rejection');
+    }
+  },
+});
 const services = {
   main: useService('main'),
   sub: useService('sub'),
@@ -61,59 +73,119 @@ function recordHandle(channel: string, data: unknown, sourceId: number) {
 
 if (rendererId === 'main') {
   const service = services.main;
-  service.handle('duplicate', (_event, [value], options) => {
-    recordHandle('duplicate', value, options.webContentsId);
+  service.handle('duplicate', (context, value) => {
+    recordHandle(
+      'duplicate',
+      value,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return `main:${value}`;
   });
-  service.handle('mainOnly', (_event, _data, options) => {
-    recordHandle('mainOnly', undefined, options.webContentsId);
+  service.handle('mainOnly', (context) => {
+    recordHandle(
+      'mainOnly',
+      undefined,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return 'main-only';
   });
-  service.handle('common', (_event, [value], options) => {
-    recordHandle('common', value, options.webContentsId);
+  service.handle('common', (context, value) => {
+    recordHandle(
+      'common',
+      value,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return `main:${value}`;
   });
-  service.receive('commonMessage', (_event, value) => {
-    events.push({ kind: 'receive', channel: 'commonMessage', data: value });
+  service.receive('commonMessage', (context, value) => {
+    events.push({
+      kind: 'receive',
+      channel: 'commonMessage',
+      data: value,
+      sourceId:
+        context.source.kind === 'renderer'
+          ? context.source.webContentsId
+          : undefined,
+    });
   });
 }
 
 if (rendererId === 'sub') {
   const service = services.sub;
-  service.handle('duplicate', (_event, [value], options) => {
-    recordHandle('duplicate', value, options.webContentsId);
+  service.handle('duplicate', (context, value) => {
+    recordHandle(
+      'duplicate',
+      value,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return value * 2;
   });
-  service.handle('subOnly', (_event, [enabled], options) => {
-    recordHandle('subOnly', enabled, options.webContentsId);
+  service.handle('subOnly', (context, enabled) => {
+    recordHandle(
+      'subOnly',
+      enabled,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return !enabled;
   });
-  service.handle('throwRenderer', (_event, [message], options) => {
-    recordHandle('throwRenderer', message, options.webContentsId);
+  service.handle('throwRenderer', (context, message) => {
+    recordHandle(
+      'throwRenderer',
+      message,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     throw new Error(message);
   });
-  service.handle('waitRenderer', (_event, _data, options) => {
-    recordHandle('waitRenderer', undefined, options.webContentsId);
+  service.handle('unserializable', (context) => {
+    recordHandle('unserializable', undefined, context.source.webContentsId);
+    return () => 'not-cloneable';
+  });
+  service.handle('waitRenderer', (context) => {
+    recordHandle(
+      'waitRenderer',
+      undefined,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return new Promise<string>(() => {});
   });
-  service.handle('outOfOrder', async (_event, [index, delay], options) => {
-    recordHandle('outOfOrder', { delay, index }, options.webContentsId);
+  service.handle('outOfOrder', async (context, index, delay) => {
+    recordHandle(
+      'outOfOrder',
+      { delay, index },
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     await new Promise((resolve) => setTimeout(resolve, delay));
     return { index };
   });
-  service.receive('receiveMessage', (_event, value) => {
-    events.push({ kind: 'receive', channel: 'receiveMessage', data: value });
+  service.receive('receiveMessage', (context, value) => {
+    events.push({
+      kind: 'receive',
+      channel: 'receiveMessage',
+      data: value,
+      sourceId:
+        context.source.kind === 'renderer'
+          ? context.source.webContentsId
+          : undefined,
+    });
   });
-  service.receiveOnce('receiveOnceMessage', (_event, value) => {
+  service.receiveOnce('receiveOnceMessage', (context, value) => {
     events.push({
       kind: 'receive',
       channel: 'receiveOnceMessage',
       data: value,
+      sourceId:
+        context.source.kind === 'renderer'
+          ? context.source.webContentsId
+          : undefined,
     });
+  });
+  service.receive('throwRendererEvent', async () => {
+    await Promise.resolve();
+    throw new Error('renderer-event-boom');
   });
   const unsubscribeMessage = service.receive(
     'unsubscribedMessage',
-    (_event, value) => {
+    (_context, value) => {
       events.push({
         kind: 'receive',
         channel: 'unsubscribedMessage',
@@ -122,22 +194,50 @@ if (rendererId === 'sub') {
     },
   );
   unsubscribeMessage();
-  service.handle('common', (_event, [value], options) => {
-    recordHandle('common', value, options.webContentsId);
+  service.handle('common', (context, value) => {
+    recordHandle(
+      'common',
+      value,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return `sub:${value}`;
   });
-  service.receive('commonMessage', (_event, value) => {
-    events.push({ kind: 'receive', channel: 'commonMessage', data: value });
+  service.receive('commonMessage', (context, value) => {
+    events.push({
+      kind: 'receive',
+      channel: 'commonMessage',
+      data: value,
+      sourceId:
+        context.source.kind === 'renderer'
+          ? context.source.webContentsId
+          : undefined,
+    });
   });
 
   // Observe the wire metadata separately without exposing raw ipcRenderer.
   ipcRenderer.prependListener(
-    `${channelPrefix}external:receiveMessage`,
-    (_event, _data, options: { webContentsId?: number } | undefined) => {
+    `${channelPrefix}external:event:receiveMessage`,
+    (
+      _event,
+      _data,
+      metadata:
+        | { source?: { kind?: string; webContentsId?: number } }
+        | undefined,
+    ) => {
       events.push({
         kind: 'wire',
         channel: 'receiveMessage',
-        sourceId: options?.webContentsId,
+        sourceId: metadata?.source?.webContentsId,
+      });
+    },
+  );
+  ipcRenderer.prependListener(
+    `${channelPrefix}external:request:waitRenderer`,
+    (_event, _data, metadata: { requestId?: string } | undefined) => {
+      events.push({
+        kind: 'wire',
+        channel: 'waitRenderer',
+        data: { requestId: metadata?.requestId },
       });
     },
   );
@@ -145,20 +245,40 @@ if (rendererId === 'sub') {
 
 if (rendererId === 'other') {
   const service = services.other;
-  service.handle('duplicate', (_event, [value], options) => {
-    recordHandle('duplicate', value, options.webContentsId);
+  service.handle('duplicate', (context, value) => {
+    recordHandle(
+      'duplicate',
+      value,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return !value;
   });
-  service.handle('otherOnly', (_event, [name], options) => {
-    recordHandle('otherOnly', name, options.webContentsId);
+  service.handle('otherOnly', (context, name) => {
+    recordHandle(
+      'otherOnly',
+      name,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return `other:${name}`;
   });
-  service.handle('common', (_event, [value], options) => {
-    recordHandle('common', value, options.webContentsId);
+  service.handle('common', (context, value) => {
+    recordHandle(
+      'common',
+      value,
+      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
+    );
     return `other:${value}`;
   });
-  service.receive('commonMessage', (_event, value) => {
-    events.push({ kind: 'receive', channel: 'commonMessage', data: value });
+  service.receive('commonMessage', (context, value) => {
+    events.push({
+      kind: 'receive',
+      channel: 'commonMessage',
+      data: value,
+      sourceId:
+        context.source.kind === 'renderer'
+          ? context.source.webContentsId
+          : undefined,
+    });
   });
 }
 
@@ -171,9 +291,42 @@ type MainRuntimeService = {
 };
 
 type InterRendererRuntimeService = {
+  destroy(): void;
+  handle(
+    channel: string,
+    listener: (...args: unknown[]) => unknown,
+  ): () => void;
   invokeTo(channel: string, options: TargetOptions): Promise<unknown>;
   sendTo(channel: string, options: Omit<TargetOptions, 'timeout'>): void;
 };
+
+function describeError(error: unknown): DriverError {
+  if (!(error instanceof Error)) {
+    return {
+      message: String(error),
+      name: 'Error',
+    };
+  }
+  const details = error as Error & {
+    code?: string;
+    remoteCode?: string;
+  };
+  return {
+    code: details.code,
+    message: details.message,
+    name: details.name,
+    remoteCode: details.remoteCode,
+  };
+}
+
+async function captureError(operation: () => Promise<unknown>) {
+  try {
+    await operation();
+  } catch (error) {
+    return describeError(error);
+  }
+  throw new Error('Expected IPC operation to fail');
+}
 
 // The driver intentionally accepts arbitrary wire input for negative E2E cases.
 const mainRuntimeService = mainService as unknown as MainRuntimeService;
@@ -186,11 +339,31 @@ const driver: E2EDriver = {
   invokeMain(channel, data = [], timeout) {
     return mainRuntimeService.invoke(channel, { data, timeout });
   },
+  invokeMainError(channel, data = [], timeout) {
+    return captureError(() =>
+      mainRuntimeService.invoke(channel, { data, timeout }),
+    );
+  },
   sendMain(channel, data = []) {
     mainRuntimeService.send(channel, ...data);
   },
   invokeTo(channel, options) {
     return interRendererRuntimeService.invokeTo(channel, options);
+  },
+  invokeToError(channel, options) {
+    return captureError(() =>
+      interRendererRuntimeService.invokeTo(channel, options),
+    );
+  },
+  forgeReply(requestId, value) {
+    ipcRenderer.send(`${channelPrefix}internal:reply-to`, {
+      requestId,
+      response: {
+        ok: true,
+        value,
+      },
+      version: 1,
+    });
   },
   sendTo(channel, options) {
     interRendererRuntimeService.sendTo(channel, options);
@@ -203,6 +376,60 @@ const driver: E2EDriver = {
   },
   control<T>(command: string, payload?: unknown) {
     return ipcRenderer.invoke(CONTROL_CHANNEL, command, payload) as Promise<T>;
+  },
+  async localControl<T>(command: string, payload?: unknown) {
+    switch (command) {
+      case 'reported-errors':
+        return [...reportedErrors] as T;
+      case 'clear-reported-errors':
+        reportedErrors.length = 0;
+        return true as T;
+      case 'reject-reported-errors':
+        rejectReportedErrors = payload === true;
+        return rejectReportedErrors as T;
+      case 'register-duplicate-handler':
+        {
+          const competingService =
+            new IpcRendererService() as unknown as InterRendererRuntimeService;
+          try {
+            const dispose = competingService.handle(
+              'duplicate',
+              () => undefined,
+            );
+            dispose();
+            competingService.destroy();
+          } catch (error) {
+            competingService.destroy();
+            return describeError(error) as T;
+          }
+        }
+        throw new Error('Expected duplicate renderer handler registration');
+      case 'destroy-with-pending': {
+        const eventChannel = `${channelPrefix}external:event:commonMessage`;
+        const requestChannel = `${channelPrefix}external:request:duplicate`;
+        const eventListenerCountBefore =
+          ipcRenderer.listenerCount(eventChannel);
+        const listenerCountBefore = ipcRenderer.listenerCount(requestChannel);
+        const pending = captureError(() =>
+          interRendererRuntimeService.invokeTo('waitRenderer', {
+            timeout: 1_000,
+            windowParams: ['sub', workspaceId],
+          }),
+        );
+        await Promise.resolve();
+        interRendererRuntimeService.destroy();
+        const error = await pending;
+        return {
+          error,
+          eventListenerCountAfter: ipcRenderer.listenerCount(eventChannel),
+          eventListenerCountBefore,
+          listenerCountAfter: ipcRenderer.listenerCount(requestChannel),
+          listenerCountBefore,
+        } as T;
+      }
+      default:
+        throw new Error(`Unknown local control command: ${command}`);
+    }
   },
 };
 

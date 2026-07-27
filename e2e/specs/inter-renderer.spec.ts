@@ -4,6 +4,8 @@ import {
   control,
   getEvents,
   invokeTo,
+  invokeToError,
+  localControl,
   sendTo,
 } from '../support/driver';
 
@@ -42,14 +44,16 @@ test('windowParams, webContentsId and common channels route correctly', async ({
     }),
   ).resolves.toBe(false);
   await expect(
-    invokeTo(main, 'throwRenderer', {
+    invokeToError(main, 'throwRenderer', {
       data: ['renderer-boom'],
       windowParams: ['sub', electronHarness.workspaceId],
     }),
-  ).rejects.toThrow(/renderer-boom/);
-  await expect
-    .poll(() => electronHarness.consumeMainError(/renderer-boom/))
-    .toBe(true);
+  ).resolves.toMatchObject({
+    code: 'IPC_REMOTE_ERROR',
+    message: 'renderer-boom',
+    name: 'IpcRemoteError',
+    remoteCode: 'IPC_REMOTE_ERROR',
+  });
 
   const subEvents = await getEvents(sub);
   expect(
@@ -97,11 +101,13 @@ test('sendTo preserves payload and source metadata', async ({
           kind: 'receive',
           channel: 'receiveMessage',
           data: 'message',
+          sourceId: state.windowIds.main,
         },
         {
           kind: 'receive',
           channel: 'receiveMessage',
           data: 'message-by-id',
+          sourceId: state.windowIds.main,
         },
         {
           kind: 'wire',
@@ -112,6 +118,7 @@ test('sendTo preserves payload and source metadata', async ({
           kind: 'receive',
           channel: 'receiveOnceMessage',
           data: 'first',
+          sourceId: state.windowIds.main,
         },
       ]),
     );
@@ -123,6 +130,7 @@ test('sendTo preserves payload and source metadata', async ({
       kind: 'receive',
       channel: 'receiveOnceMessage',
       data: 'first',
+      sourceId: state.windowIds.main,
     },
   ]);
   expect(events.some((event) => event.channel === 'unsubscribedMessage')).toBe(
@@ -142,76 +150,55 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await clearEvents(sub);
 
   await expect(
-    invokeTo(main, 'duplicate', {
+    invokeToError(main, 'duplicate', {
       data: [1],
       webContentsId: state.windowIds.sub,
       windowParams: ['sub', electronHarness.workspaceId],
     }),
-  ).rejects.toThrow(/exactly one of webContentsId or windowParams is required/);
-  await expect
-    .poll(() =>
-      electronHarness.consumeMainError(
-        /exactly one of webContentsId or windowParams is required/,
-      ),
-    )
-    .toBe(true);
+  ).resolves.toMatchObject({
+    code: 'IPC_REMOTE_ERROR',
+    remoteCode: 'IPC_INVALID_TARGET',
+  });
   await expect(
-    invokeTo(main, 'duplicate', {
+    invokeToError(main, 'duplicate', {
       data: [1],
       webContentsId: state.windowIds.other,
       windowParams: ['sub', electronHarness.workspaceId],
     }),
-  ).rejects.toThrow(/exactly one of webContentsId or windowParams is required/);
-  await expect
-    .poll(() =>
-      electronHarness.consumeMainError(
-        /exactly one of webContentsId or windowParams is required/,
-      ),
-    )
-    .toBe(true);
+  ).resolves.toMatchObject({
+    remoteCode: 'IPC_INVALID_TARGET',
+  });
   await expect(
-    invokeTo(main, 'duplicate', {
+    invokeToError(main, 'duplicate', {
       data: [1],
     }),
-  ).rejects.toThrow(/exactly one of webContentsId or windowParams is required/);
-  await expect
-    .poll(() =>
-      electronHarness.consumeMainError(
-        /exactly one of webContentsId or windowParams is required/,
-      ),
-    )
-    .toBe(true);
+  ).resolves.toMatchObject({
+    remoteCode: 'IPC_INVALID_TARGET',
+  });
   await expect(
-    invokeTo(main, 'duplicate', {
+    invokeToError(main, 'duplicate', {
       data: [1],
       windowParams: ['sub', 'missing-workspace'],
     }),
-  ).rejects.toThrow(/windowParams did not resolve to a webContentsId/);
-  await expect
-    .poll(() =>
-      electronHarness.consumeMainError(
-        /windowParams did not resolve to a webContentsId/,
-      ),
-    )
-    .toBe(true);
+  ).resolves.toMatchObject({
+    remoteCode: 'IPC_TARGET_NOT_FOUND',
+  });
   await expect(
-    invokeTo(main, 'duplicate', {
+    invokeToError(main, 'duplicate', {
       data: [1],
       webContentsId: 999_999,
     }),
-  ).rejects.toThrow(/not found/);
-  await expect
-    .poll(() => electronHarness.consumeMainError(/999999.*not found/))
-    .toBe(true);
+  ).resolves.toMatchObject({
+    remoteCode: 'IPC_TARGET_NOT_FOUND',
+  });
   await expect(
-    invokeTo(main, 'duplicate', {
+    invokeToError(main, 'duplicate', {
       data: [1],
       webContentsId: 0,
     }),
-  ).rejects.toThrow(/with id 0 not found/);
-  await expect
-    .poll(() => electronHarness.consumeMainError(/with id 0 not found/))
-    .toBe(true);
+  ).resolves.toMatchObject({
+    remoteCode: 'IPC_TARGET_NOT_FOUND',
+  });
 
   await sendTo(main, 'receiveMessage', {
     data: ['dropped-same-target'],
@@ -221,7 +208,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
+        /^\[electron-ipc-service\] IPC_INVALID_TARGET: exactly one of webContentsId or windowParams is required$/,
       ),
     )
     .toBe(true);
@@ -234,7 +221,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
+        /^\[electron-ipc-service\] IPC_INVALID_TARGET: exactly one of webContentsId or windowParams is required$/,
       ),
     )
     .toBe(true);
@@ -245,7 +232,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": exactly one of webContentsId or windowParams is required$/,
+        /^\[electron-ipc-service\] IPC_INVALID_TARGET: exactly one of webContentsId or windowParams is required$/,
       ),
     )
     .toBe(true);
@@ -257,7 +244,7 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": windowParams did not resolve to a webContentsId$/,
+        /^\[electron-ipc-service\] IPC_TARGET_NOT_FOUND: windowParams did not resolve to a webContentsId$/,
       ),
     )
     .toBe(true);
@@ -269,9 +256,72 @@ test('invalid selectors and targets reject invokeTo and safely drop sendTo', asy
   await expect
     .poll(() =>
       electronHarness.consumeWarning(
-        /^\[electron-ipc-service\] sendTo dropped "ipc-service:external:receiveMessage": webContents with id 999999 not found$/,
+        /^\[electron-ipc-service\] IPC_TARGET_NOT_FOUND: webContents with id 999999 not found$/,
       ),
     )
     .toBe(true);
   expect(await getEvents(sub)).toEqual([]);
+});
+
+test('unserializable renderer responses fail without waiting for timeout', async ({
+  electronHarness,
+}) => {
+  const main = electronHarness.page('main');
+  const sub = electronHarness.page('sub');
+  await localControl(sub, 'clear-reported-errors');
+
+  await expect(
+    invokeToError(main, 'unserializable', {
+      timeout: 1_000,
+      windowParams: ['sub', electronHarness.workspaceId],
+    }),
+  ).resolves.toMatchObject({
+    code: 'IPC_REMOTE_ERROR',
+    remoteCode: 'IPC_SERIALIZATION_ERROR',
+  });
+
+  await expect
+    .poll(() => localControl(sub, 'reported-errors'))
+    .toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'IPC_SERIALIZATION_ERROR',
+        }),
+      ]),
+    );
+});
+
+test('async onError rejections are observed without an unhandled rejection', async ({
+  electronHarness,
+}) => {
+  const main = electronHarness.page('main');
+  const sub = electronHarness.page('sub');
+  await localControl(sub, 'clear-reported-errors');
+  await localControl(sub, 'reject-reported-errors', true);
+
+  await sendTo(main, 'throwRendererEvent', {
+    windowParams: ['sub', electronHarness.workspaceId],
+  });
+  await expect
+    .poll(() => localControl(sub, 'reported-errors'))
+    .toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'IPC_PROTOCOL_ERROR',
+          message: 'renderer-event-boom',
+        }),
+      ]),
+    );
+  await expect
+    .poll(() =>
+      electronHarness.consumeRendererWarning(/onError failed.*rejection/i),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      electronHarness.consumeRendererWarning(
+        /IPC_PROTOCOL_ERROR: renderer-event-boom/,
+      ),
+    )
+    .toBe(true);
 });

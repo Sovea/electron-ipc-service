@@ -1,9 +1,31 @@
 import electron, { type IpcRendererEvent } from 'electron';
 import type { RequireExactlyOne } from 'type-fest';
 import { IpcChannelType } from '../constants/index.js';
+import {
+  IpcError,
+  IpcErrorCode,
+  serializeIpcError,
+  toIpcError,
+} from '../errors.js';
+import {
+  errorResponse,
+  IPC_PROTOCOL_VERSION,
+  type IpcResponse,
+  type RoutedEventMetadata,
+  type RoutedReplyMessage,
+  type RoutedRequestMetadata,
+  successResponse,
+  unwrapResponse,
+} from '../protocol.js';
 import type {
+  EmptyIpcEndpoint,
+  EventListener,
   Fn,
-  Optional,
+  IpcEndpointConstraint,
+  IpcServiceBaseOptions,
+  RendererEventContext,
+  RendererRequestContext,
+  RequestHandler,
   RequestOptions,
   Unsubscribe,
 } from '../types/index.js';
@@ -11,264 +33,403 @@ import type {
   APIBetweenRenderers,
   InterRendererIpcRendererService,
   IpcRendererId,
-  IpcRendererServiceListener,
   MultiRenderersSchema,
 } from '../types/renderer.js';
-import { processFunction } from '../utils/fn.js';
+import { withTimeout } from '../utils/fn.js';
 import { BaseIpcService } from './base.js';
 
 const { ipcRenderer } = electron;
+const requestHandlerOwners = new Map<string, symbol>();
 
-/** Unpack the wire tuple so receive listeners get their declared arguments. */
-function wrapReceiveListener<H extends Record<string, Fn>, K extends keyof H>(
-  listener: (event: IpcRendererEvent, ...args: Parameters<H[K]>) => void,
-) {
-  return (event: IpcRendererEvent, data?: Parameters<H[K]>) => {
-    const requestData = data ?? ([] as unknown as Parameters<H[K]>);
-    listener(event, ...requestData);
-  };
-}
-
-/**
- * ipc renderer service
- * @template R - request ipc type
- * @template H - handle ipc type
- * @template M - main process ipc type
- * @template Q - query webContentsId function type
- */
 export class IpcRendererService<
-  R extends Record<string, Fn<any, any>> = any,
-  H extends Record<string, Fn<any, any>> = any,
-  M extends Record<string, Fn<any, any>> = any,
-  Q extends Fn<any, number | undefined> = any,
+  R extends IpcEndpointConstraint<R> = EmptyIpcEndpoint,
+  H extends IpcEndpointConstraint<H> = EmptyIpcEndpoint,
+  M extends IpcEndpointConstraint<M> = EmptyIpcEndpoint,
+  Q extends Fn<never[], number | undefined> = Fn<never[], number | undefined>,
 > extends BaseIpcService {
-  /**
-   * wrap ipc service listener
-   * @param listener
-   * @returns
-   */
-  wrapListener<K extends keyof H>(listener: IpcRendererServiceListener<H, K>) {
-    return async (...args: Parameters<typeof listener>) => {
-      const [, , options] = args;
-      const { requestId, timeout } = options;
-      let data: Optional<ReturnType<typeof listener>>;
-      let rspError: Optional<Error>;
+  send<K extends keyof M['events'] & string>(
+    channel: K,
+    ...data: Parameters<M['events'][K]>
+  ) {
+    this.assertActive();
+    this.sendMessage(this.eventChannel(channel), channel, ...data);
+  }
+
+  async invoke<K extends keyof M['requests'] & string>(
+    channel: K,
+    options: RequestOptions<M['requests'], K>,
+  ): Promise<Awaited<ReturnType<M['requests'][K]>>> {
+    this.assertActive();
+    const timeout = this.resolveTimeout(options?.timeout);
+    const data = options?.data ?? [];
+    try {
+      const operation = ipcRenderer
+        .invoke(this.requestChannel(channel), ...data)
+        .then((response) =>
+          unwrapResponse<Awaited<ReturnType<M['requests'][K]>>>(response, {
+            channel,
+          }),
+        );
+      return await this.waitForRequest(operation, {
+        channel,
+        timeout,
+      });
+    } catch (error) {
+      throw toIpcError(error, IpcErrorCode.ProtocolError, { channel });
+    }
+  }
+
+  async invokeTo<K extends keyof R['requests'] & string>(
+    channel: K,
+    options: RequestOptions<R['requests'], K> &
+      RequireExactlyOne<{
+        webContentsId: number;
+        windowParams: Parameters<Q>;
+      }>,
+  ): Promise<Awaited<ReturnType<R['requests'][K]>>> {
+    this.assertActive();
+    const timeout = this.resolveTimeout(options.timeout);
+    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:invoke-to`);
+    try {
+      const operation = ipcRenderer
+        .invoke(ipcChannel, channel, { ...options, timeout })
+        .then((response) =>
+          unwrapResponse<Awaited<ReturnType<R['requests'][K]>>>(response, {
+            channel,
+          }),
+        );
+      return await this.waitForRequest(operation, {
+        channel,
+        targetWebContentsId: options.webContentsId,
+        timeout,
+      });
+    } catch (error) {
+      throw toIpcError(error, IpcErrorCode.ProtocolError, { channel });
+    }
+  }
+
+  sendTo<K extends keyof R['events'] & string>(
+    channel: K,
+    options: Omit<RequestOptions<R['events'], K>, 'timeout'> &
+      RequireExactlyOne<{
+        webContentsId: number;
+        windowParams: Parameters<Q>;
+      }>,
+  ) {
+    this.assertActive();
+    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:send-to`);
+    this.sendMessage(ipcChannel, channel, channel, options);
+  }
+
+  handle<K extends keyof H['requests'] & string>(
+    channel: K,
+    listener: RequestHandler<H['requests'], K, RendererRequestContext<K>>,
+  ): Unsubscribe {
+    this.assertActive();
+    const ipcChannel = this.requestChannel(channel);
+    const wrapped = this.wrapRequestListener(channel, listener);
+    return this.registerRequestHandler(
+      channel,
+      ipcChannel,
+      () => {
+        ipcRenderer.on(ipcChannel, wrapped);
+      },
+      () => {
+        ipcRenderer.off(ipcChannel, wrapped);
+      },
+    );
+  }
+
+  handleOnce<K extends keyof H['requests'] & string>(
+    channel: K,
+    listener: RequestHandler<H['requests'], K, RendererRequestContext<K>>,
+  ): Unsubscribe {
+    this.assertActive();
+    const ipcChannel = this.requestChannel(channel);
+    let unsubscribe: Unsubscribe = () => {};
+    const wrapped = this.wrapRequestListener(channel, listener, () => {
+      unsubscribe();
+    });
+    unsubscribe = this.registerRequestHandler(
+      channel,
+      ipcChannel,
+      () => {
+        ipcRenderer.once(ipcChannel, wrapped);
+      },
+      () => {
+        ipcRenderer.off(ipcChannel, wrapped);
+      },
+    );
+    return unsubscribe;
+  }
+
+  receive<K extends keyof H['events'] & string>(
+    channel: K,
+    listener: EventListener<H['events'], K, RendererEventContext<K>>,
+  ): Unsubscribe {
+    this.assertActive();
+    const ipcChannel = this.eventChannel(channel);
+    const wrapped = this.wrapEventListener(channel, listener);
+    ipcRenderer.on(ipcChannel, wrapped);
+    return this.ownRegistration(() => {
+      ipcRenderer.off(ipcChannel, wrapped);
+    });
+  }
+
+  receiveOnce<K extends keyof H['events'] & string>(
+    channel: K,
+    listener: EventListener<H['events'], K, RendererEventContext<K>>,
+  ): Unsubscribe {
+    this.assertActive();
+    const ipcChannel = this.eventChannel(channel);
+    let unsubscribe: Unsubscribe = () => {};
+    const wrapped = this.wrapEventListener(channel, listener, () => {
+      unsubscribe();
+    });
+    ipcRenderer.once(ipcChannel, wrapped);
+    unsubscribe = this.ownRegistration(() => {
+      ipcRenderer.off(ipcChannel, wrapped);
+    });
+    return unsubscribe;
+  }
+
+  private registerRequestHandler(
+    channel: string,
+    ipcChannel: string,
+    register: () => void,
+    dispose: Unsubscribe,
+  ): Unsubscribe {
+    if (requestHandlerOwners.has(ipcChannel)) {
+      throw new IpcError(
+        IpcErrorCode.HandlerAlreadyRegistered,
+        `A request handler is already registered for "${channel}"`,
+        { channel },
+      );
+    }
+    const owner = Symbol(ipcChannel);
+
+    try {
+      register();
+    } catch (error) {
+      throw new IpcError(
+        IpcErrorCode.HandlerAlreadyRegistered,
+        `Unable to register request handler for "${channel}"`,
+        {
+          cause: error,
+          channel,
+        },
+      );
+    }
+    requestHandlerOwners.set(ipcChannel, owner);
+
+    return this.ownRegistration(() => {
+      if (requestHandlerOwners.get(ipcChannel) === owner) {
+        requestHandlerOwners.delete(ipcChannel);
+      }
+      dispose();
+    });
+  }
+
+  private sendMessage(ipcChannel: string, channel: string, ...args: unknown[]) {
+    try {
+      ipcRenderer.send(ipcChannel, ...args);
+    } catch (error) {
+      throw toIpcError(error, IpcErrorCode.SerializationError, {
+        channel,
+      });
+    }
+  }
+
+  private wrapRequestListener<K extends keyof H['requests'] & string>(
+    channel: K,
+    listener: RequestHandler<H['requests'], K, RendererRequestContext<K>>,
+    onReceive?: () => void,
+  ) {
+    return (event: IpcRendererEvent, data: unknown, metadata: unknown) => {
+      onReceive?.();
+      if (!this.isRequestMetadata(metadata) || !Array.isArray(data)) {
+        this.reportError(
+          new IpcError(
+            IpcErrorCode.ProtocolError,
+            'Received an invalid routed IPC request',
+            { channel },
+          ),
+        );
+        return;
+      }
+
+      const context: RendererRequestContext<K> = {
+        channel,
+        event,
+        kind: 'request',
+        source: metadata.source,
+      };
+
+      const processRequest = async () => {
+        let response: IpcResponse;
+        try {
+          const result = listener(
+            context,
+            ...(data as Parameters<H['requests'][K]>),
+          );
+          const value = await withTimeout(
+            Promise.resolve(result),
+            metadata.timeout,
+            () => this.timeoutError(channel, metadata.requestId),
+          );
+          response = successResponse(value);
+        } catch (error) {
+          response = errorResponse(serializeIpcError(error));
+        }
+        this.sendRoutedReply(channel, metadata.requestId, response);
+      };
+
+      void processRequest().catch((error) => {
+        this.reportError(error, {
+          channel,
+          requestId: metadata.requestId,
+        });
+      });
+    };
+  }
+
+  private wrapEventListener<K extends keyof H['events'] & string>(
+    channel: K,
+    listener: EventListener<H['events'], K, RendererEventContext<K>>,
+    onReceive?: () => void,
+  ) {
+    return (event: IpcRendererEvent, data: unknown, metadata: unknown) => {
+      onReceive?.();
+      if (!this.isEventMetadata(metadata) || !Array.isArray(data)) {
+        this.reportError(
+          new IpcError(
+            IpcErrorCode.ProtocolError,
+            'Received an invalid routed IPC event',
+            { channel },
+          ),
+        );
+        return;
+      }
+
+      const context: RendererEventContext<K> = {
+        channel,
+        event,
+        kind: 'event',
+        source: metadata.source,
+      };
       try {
-        data = await processFunction(listener, {
-          data: args,
-          timeout,
+        Promise.resolve(
+          listener(context, ...(data as Parameters<H['events'][K]>)),
+        ).catch((error) => {
+          this.reportError(error, { channel });
         });
       } catch (error) {
-        rspError = error as Error;
+        this.reportError(error, { channel });
       }
-      ipcRenderer.send(
-        this.wrapChannel(`${IpcChannelType.Internal}:reply-to`),
-        requestId,
-        data,
-        rspError,
+    };
+  }
+
+  private sendRoutedReply(
+    channel: string,
+    requestId: string,
+    response: IpcResponse,
+  ) {
+    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:reply-to`);
+    const reply: RoutedReplyMessage = {
+      requestId,
+      response,
+      version: IPC_PROTOCOL_VERSION,
+    };
+
+    try {
+      ipcRenderer.send(ipcChannel, reply);
+    } catch (error) {
+      const serializationError = new IpcError(
+        IpcErrorCode.SerializationError,
+        `Unable to serialize IPC response for "${channel}"`,
+        { cause: error, channel, requestId },
       );
-    };
-  }
+      this.reportError(serializationError);
 
-  /**
-   * send to main process
-   * @param channel ipc channel name
-   * @param data request data
-   * @returns
-   */
-  send<K extends keyof M & string>(
-    channel: K,
-    ...data: Parameters<M[K]>['length'] extends 0 ? unknown[] : Parameters<M[K]>
-  ) {
-    ipcRenderer.send(
-      this.wrapChannel(`${IpcChannelType.External}:${channel}`),
-      ...data,
-    );
-  }
-
-  /**
-   * request to main process
-   * @param channel ipc channel name
-   * @param options.data request data
-   * @param options.timeout request timeout in milliseconds, < 0 for no timeout
-   * @returns
-   */
-  async invoke<K extends keyof M & string>(
-    channel: K,
-    options: RequestOptions<M, K>,
-  ): Promise<Awaited<ReturnType<M[K]>>> {
-    const { timeout = 0, data = [] } = options || {};
-    const ipcChannel = this.wrapChannel(
-      `${IpcChannelType.External}:${channel}`,
-    );
-    const invokePromise = ipcRenderer.invoke(ipcChannel, ...data);
-    if (timeout > 0) {
-      const timeoutPromise = new Promise<never>((_resolve, reject) => {
-        const timer = setTimeout(() => {
-          clearTimeout(timer);
-          reject(new Error('Invoke function timed out'));
-        }, timeout);
-      });
-      return await Promise.race([invokePromise, timeoutPromise]);
+      const fallbackReply: RoutedReplyMessage = {
+        requestId,
+        response: errorResponse(serializeIpcError(serializationError)),
+        version: IPC_PROTOCOL_VERSION,
+      };
+      try {
+        ipcRenderer.send(ipcChannel, fallbackReply);
+      } catch (fallbackError) {
+        this.reportError(fallbackError, { channel, requestId });
+      }
     }
-    return await invokePromise;
   }
 
-  /**
-   * request to target renderer process
-   * @param channel ipc channel name
-   * @param options.data request data
-   * @param options.timeout request timeout in milliseconds
-   * @param options.webContentsId target webContents id (mutually exclusive with windowParams)
-   * @param options.windowParams target query parameters (mutually exclusive with webContentsId)
-   * @returns
-   */
-  invokeTo<K extends keyof R & string>(
-    channel: K,
-    options: RequestOptions<R, K> &
-      RequireExactlyOne<{
-        webContentsId: number;
-        windowParams: Parameters<Q>;
-      }>,
-  ): Promise<Awaited<ReturnType<R[K]>>> {
-    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:invoke-to`);
-    return ipcRenderer.invoke(
-      ipcChannel,
-      this.wrapChannel(`${IpcChannelType.External}:${channel}`),
-      options,
+  private isRequestMetadata(value: unknown): value is RoutedRequestMetadata {
+    return (
+      !!value &&
+      typeof value === 'object' &&
+      'version' in value &&
+      value.version === IPC_PROTOCOL_VERSION &&
+      'kind' in value &&
+      value.kind === 'request' &&
+      'requestId' in value &&
+      typeof value.requestId === 'string' &&
+      'timeout' in value &&
+      typeof value.timeout === 'number' &&
+      Number.isFinite(value.timeout) &&
+      value.timeout >= 0 &&
+      'source' in value &&
+      this.isSource(value.source)
     );
   }
 
-  /**
-   * send to target renderer process
-   * @param channel ipc channel name
-   * @param options.data request data
-   * @param options.webContentsId target webContents id (mutually exclusive with windowParams)
-   * @param options.windowParams target query parameters (mutually exclusive with webContentsId)
-   * @returns
-   */
-  sendTo<K extends keyof R & string>(
-    channel: K,
-    options: Omit<RequestOptions<R, K>, 'timeout'> &
-      RequireExactlyOne<{
-        webContentsId: number;
-        windowParams: Parameters<Q>;
-      }>,
-  ) {
-    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:send-to`);
-    ipcRenderer.send(
-      ipcChannel,
-      this.wrapChannel(`${IpcChannelType.External}:${channel}`),
-      options,
+  private isEventMetadata(value: unknown): value is RoutedEventMetadata {
+    return (
+      !!value &&
+      typeof value === 'object' &&
+      'version' in value &&
+      value.version === IPC_PROTOCOL_VERSION &&
+      'kind' in value &&
+      value.kind === 'event' &&
+      'source' in value &&
+      this.isSource(value.source)
     );
   }
 
-  /**
-   * handle request from the other ipc renderers
-   * @param channel ipc channel name
-   * @param listener request handler
-   * @returns function to remove the listener
-   */
-  handle<K extends keyof H & string>(
-    channel: K,
-    listener: IpcRendererServiceListener<H, K>,
-  ): Unsubscribe {
-    const ipcChannel = this.wrapChannel(
-      `${IpcChannelType.External}:${channel}`,
+  private isSource(value: unknown): value is RoutedRequestMetadata['source'] {
+    if (!value || typeof value !== 'object' || !('kind' in value)) {
+      return false;
+    }
+    return (
+      value.kind === 'renderer' &&
+      'webContentsId' in value &&
+      typeof value.webContentsId === 'number' &&
+      Number.isInteger(value.webContentsId) &&
+      value.webContentsId >= 0
     );
-    const newListener = this.wrapListener(listener);
-    ipcRenderer.on(ipcChannel, newListener);
-    return () => {
-      ipcRenderer.off(ipcChannel, newListener);
-    };
-  }
-
-  /**
-   * handle request from the other ipc renderers only once
-   * @param channel ipc channel name
-   * @param listener request handler
-   * @returns function to remove the listener
-   */
-  handleOnce<K extends keyof H & string>(
-    channel: K,
-    listener: IpcRendererServiceListener<H, K>,
-  ): Unsubscribe {
-    const ipcChannel = this.wrapChannel(
-      `${IpcChannelType.External}:${channel}`,
-    );
-    const newListener = this.wrapListener(listener);
-    ipcRenderer.once(ipcChannel, newListener);
-    return () => {
-      ipcRenderer.off(ipcChannel, newListener);
-    };
-  }
-
-  /**
-   * receive message in the target channel from other renderer
-   * @param channel channel name
-   * @param listener event handler
-   * @return function to remove the listener
-   */
-  receive<K extends keyof H & string>(
-    channel: K,
-    listener: (event: IpcRendererEvent, ...args: Parameters<H[K]>) => void,
-  ): Unsubscribe {
-    const ipcChannel = this.wrapChannel(
-      `${IpcChannelType.External}:${channel}`,
-    );
-    const newListener = wrapReceiveListener<H, K>(listener);
-    ipcRenderer.on(ipcChannel, newListener);
-    return () => {
-      ipcRenderer.off(ipcChannel, newListener);
-    };
-  }
-
-  /**
-   * receive message in the target channel from other renderer only once
-   * @param channel ipc channel name
-   * @param listener event handler
-   * @return function to remove the listener
-   */
-  receiveOnce<K extends keyof H & string>(
-    channel: K,
-    listener: (event: IpcRendererEvent, ...args: Parameters<H[K]>) => void,
-  ): Unsubscribe {
-    const ipcChannel = this.wrapChannel(
-      `${IpcChannelType.External}:${channel}`,
-    );
-    const newListener = wrapReceiveListener<H, K>(listener);
-    ipcRenderer.once(ipcChannel, newListener);
-    return () => {
-      ipcRenderer.off(ipcChannel, newListener);
-    };
   }
 }
 
-/**
- * create ipc renderer service, for main - renderer communication only
- */
-export function create<T extends Record<string, Fn>>() {
-  return new IpcRendererService() as Omit<
-    IpcRendererService<any, any, T, any>,
+export function create<T extends IpcEndpointConstraint<T>>(
+  options?: IpcServiceBaseOptions,
+) {
+  return new IpcRendererService<EmptyIpcEndpoint, EmptyIpcEndpoint, T>(
+    options,
+  ) as Omit<
+    IpcRendererService<EmptyIpcEndpoint, EmptyIpcEndpoint, T>,
     APIBetweenRenderers
   >;
 }
 
-/**
- * create ipc renderer service, support inter-renderers communication
- * @template T - base schema for ipc renderer service
- * @returns function to get typed ipc renderer service
- */
 export function createForInterRenderers<
   T extends MultiRenderersSchema,
-  Q extends Fn<any, number | undefined>,
->() {
-  const ipcRendererService = new IpcRendererService();
+  Q extends Fn<never[], number | undefined>,
+>(options?: IpcServiceBaseOptions) {
+  const ipcRendererService = new IpcRendererService(options);
 
-  const useIpcRendererService = <K extends string & IpcRendererId<T>>(
+  const useIpcRendererService = <K extends IpcRendererId<T>>(
     _key: K,
   ): InterRendererIpcRendererService<T, K, Q> => {
-    // One runtime instance is shared; the current renderer only specializes its public type.
     return ipcRendererService as unknown as InterRendererIpcRendererService<
       T,
       K,

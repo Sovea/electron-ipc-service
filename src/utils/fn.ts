@@ -1,45 +1,49 @@
 import type { Fn } from '../types/index.js';
 
-/**
- * process async/sync function
- * @param fn function to be processed
- * @param options.timeout timeout in milliseconds
- */
-export async function processFunction<T extends Fn<[], any>>(
-  fn: T,
-  options?: {
-    timeout?: number;
-  },
-): Promise<Awaited<ReturnType<T>>>;
-/**
- * process async/sync function
- * @param fn function to be processed
- * @param options.data function arguments
- * @param options.timeout timeout in milliseconds
- */
-export async function processFunction<T extends Fn>(
+export function withTimeout<T>(
+  promise: PromiseLike<T>,
+  timeout: number,
+  createError: () => Error,
+): Promise<T> {
+  if (timeout === 0) {
+    return Promise.resolve(promise);
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(createError());
+    }, timeout);
+
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+export function processFunction<T extends Fn>(
   fn: T,
   options: {
-    timeout?: number;
+    timeout: number;
     data: Parameters<T>;
-  },
-): Promise<Awaited<ReturnType<T>>>;
-export async function processFunction<T extends Fn>(
-  fn: T,
-  options?: {
-    timeout?: number;
-    data?: Parameters<T>;
+    createTimeoutError: () => Error;
   },
 ): Promise<Awaited<ReturnType<T>>> {
-  const { data = [], timeout = 0 } = options || {};
-  const functionExecution = Promise.resolve(fn(...data));
-  if (timeout > 0) {
-    const timeoutPromise = new Promise<never>((_resolve, reject) => {
-      setTimeout(() => {
-        reject(new Error('Process function timed out'));
-      }, timeout);
-    });
-    return await Promise.race([functionExecution, timeoutPromise]);
+  let result: ReturnType<T>;
+  try {
+    result = fn(...options.data) as ReturnType<T>;
+  } catch (error) {
+    return Promise.reject(error);
   }
-  return await functionExecution;
+  return withTimeout(
+    Promise.resolve(result),
+    options.timeout,
+    options.createTimeoutError,
+  );
 }
