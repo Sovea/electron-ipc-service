@@ -163,7 +163,10 @@ type GetWebContentsId = (rendererId: RendererId) => number | undefined;
 const mainInterRendererOptions = {
   getWebContentsId: (_rendererId: RendererId) => 1,
   requestTimeout: 500,
-} satisfies InterRendererIpcMainServiceOptions<GetWebContentsId>;
+} satisfies InterRendererIpcMainServiceOptions<
+  RendererSchema,
+  GetWebContentsId
+>;
 
 const interRendererMainService = createMainForInterRenderers<
   RendererSchema,

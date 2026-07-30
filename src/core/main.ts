@@ -25,17 +25,21 @@ import type {
   EmptyIpcEndpoint,
   EventListener,
   Fn,
+  IpcBroadcastScope,
+  IpcBroadcastScopeDescriptor,
   IpcEndpointConstraint,
   IpcServiceBaseOptions,
   IpcSource,
   MainEventContext,
   MainRequestContext,
+  RendererIpcSource,
   RequestHandler,
   Unsubscribe,
 } from '../types/index.js';
 import type {
   InterRendererIpcMainService,
   InterRendererIpcMainServiceOptions,
+  IpcSchemaConflictGuard,
   MultiRenderersSchema,
 } from '../types/renderer.js';
 import { BaseIpcService } from './base.js';
@@ -47,6 +51,14 @@ export interface IpcMainServiceOptions extends IpcServiceBaseOptions {
    * Resolves an application renderer address to a target webContentsId.
    */
   getWebContentsId?: Fn<never[], number | undefined>;
+  /**
+   * Resolves a renderer-declared logical broadcast scope to live targets.
+   */
+  resolveBroadcastTargets?: (context: {
+    readonly channel: string;
+    readonly scope: IpcBroadcastScope<IpcBroadcastScopeDescriptor>;
+    readonly source: RendererIpcSource;
+  }) => Iterable<number>;
 }
 
 type WebContentsTargetOptions = RequireExactlyOne<{
@@ -62,6 +74,11 @@ type RoutedRequestOptions = {
 type RoutedEventOptions = {
   data?: unknown[];
 } & WebContentsTargetOptions;
+
+type RoutedBroadcastOptions = {
+  data?: unknown[];
+  scope?: unknown;
+};
 
 export class IpcMainService<
   T extends IpcEndpointConstraint<T>,
@@ -171,6 +188,9 @@ export class IpcMainService<
           [
             this.getRouteData(routeOptions),
             {
+              delivery: {
+                kind: 'direct',
+              },
               kind: 'event',
               source: {
                 kind: 'renderer',
@@ -184,6 +204,99 @@ export class IpcMainService<
             targetWebContentsId: target.id,
           },
         );
+      } catch (error) {
+        this.reportError(error, {
+          channel: typeof channel === 'string' ? channel : undefined,
+        });
+      }
+    };
+
+    ipcMain.on(ipcChannel, listener);
+    return () => {
+      ipcMain.off(ipcChannel, listener);
+    };
+  }
+
+  private handleBroadcast() {
+    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:broadcast`);
+    const listener = (
+      event: IpcMainEvent,
+      channel: unknown,
+      options: unknown,
+    ) => {
+      try {
+        this.assertRouteInput(channel, options);
+        const broadcastOptions = options as RoutedBroadcastOptions;
+        const data = this.getRouteData(broadcastOptions);
+        const scope = this.getBroadcastScope(broadcastOptions);
+        const source: RendererIpcSource = {
+          kind: 'renderer',
+          webContentsId: event.sender.id,
+        };
+        const targetIds = this.resolveBroadcastTargetIds({
+          channel,
+          scope,
+          source,
+        });
+        const deliveredTargets = new Set<number>([event.sender.id]);
+
+        for (const targetWebContentsId of targetIds) {
+          if (
+            typeof targetWebContentsId !== 'number' ||
+            !Number.isInteger(targetWebContentsId) ||
+            targetWebContentsId < 0
+          ) {
+            this.reportError(
+              new IpcError(
+                IpcErrorCode.InvalidTarget,
+                'Broadcast targets must be non-negative integer webContentsIds',
+                { channel },
+              ),
+            );
+            continue;
+          }
+          if (deliveredTargets.has(targetWebContentsId)) {
+            continue;
+          }
+          deliveredTargets.add(targetWebContentsId);
+
+          const target = webContents.fromId(targetWebContentsId);
+          if (!target || target.isDestroyed()) {
+            this.reportError(
+              new IpcError(
+                IpcErrorCode.TargetNotFound,
+                `webContents with id ${targetWebContentsId} not found`,
+                { channel, targetWebContentsId },
+              ),
+            );
+            continue;
+          }
+
+          try {
+            this.sendToTarget(
+              target,
+              this.eventChannel(channel),
+              [
+                data,
+                {
+                  delivery: {
+                    kind: 'broadcast',
+                    scope,
+                  },
+                  kind: 'event',
+                  source,
+                  version: IPC_PROTOCOL_VERSION,
+                },
+              ],
+              {
+                channel,
+                targetWebContentsId,
+              },
+            );
+          } catch (error) {
+            this.reportError(error, { channel, targetWebContentsId });
+          }
+        }
       } catch (error) {
         this.reportError(error, {
           channel: typeof channel === 'string' ? channel : undefined,
@@ -358,6 +471,60 @@ export class IpcMainService<
     return data;
   }
 
+  private getBroadcastScope(
+    options: RoutedBroadcastOptions,
+  ): IpcBroadcastScope<IpcBroadcastScopeDescriptor> {
+    const scope = options.scope ?? { kind: 'all' };
+    if (
+      !scope ||
+      typeof scope !== 'object' ||
+      !('kind' in scope) ||
+      typeof scope.kind !== 'string' ||
+      scope.kind.length === 0
+    ) {
+      throw new IpcError(
+        IpcErrorCode.ProtocolError,
+        'IPC broadcast scope must contain a non-empty string kind',
+      );
+    }
+    return scope as IpcBroadcastScope<IpcBroadcastScopeDescriptor>;
+  }
+
+  private resolveBroadcastTargetIds(context: {
+    channel: string;
+    scope: IpcBroadcastScope<IpcBroadcastScopeDescriptor>;
+    source: RendererIpcSource;
+  }): unknown[] {
+    const resolver = this.mainOptions.resolveBroadcastTargets;
+    if (!resolver) {
+      throw new IpcError(
+        IpcErrorCode.InvalidTarget,
+        'resolveBroadcastTargets is required for renderer broadcasts',
+        { channel: context.channel },
+      );
+    }
+
+    const targets = resolver(context);
+    if (
+      !targets ||
+      typeof targets !== 'object' ||
+      !(Symbol.iterator in targets)
+    ) {
+      throw new IpcError(
+        IpcErrorCode.InvalidTarget,
+        'resolveBroadcastTargets must return an iterable of webContentsIds',
+        { channel: context.channel },
+      );
+    }
+    try {
+      return Array.from(targets as Iterable<unknown>);
+    } catch (error) {
+      throw toIpcError(error, IpcErrorCode.InvalidTarget, {
+        channel: context.channel,
+      });
+    }
+  }
+
   private assertRouteInput(
     channel: unknown,
     options: unknown,
@@ -441,6 +608,7 @@ export class IpcMainService<
       this.internalDisposers.push(this.handleInvokeTo());
       this.internalDisposers.push(this.handleReplyTo());
       this.internalDisposers.push(this.handleSendTo());
+      this.internalDisposers.push(this.handleBroadcast());
     } catch (error) {
       this.disposeInternalHandlers();
       throw error;
@@ -646,10 +814,12 @@ class InterRendererIpcMainServiceImpl extends IpcMainService<EmptyIpcEndpoint> {
 export function createForInterRenderers<
   T extends MultiRenderersSchema,
   Q extends Fn<never[], number | undefined>,
+  S extends IpcBroadcastScopeDescriptor = never,
 >(
-  options: InterRendererIpcMainServiceOptions<Q>,
+  options: InterRendererIpcMainServiceOptions<T, Q, S> &
+    IpcSchemaConflictGuard<T>,
 ): InterRendererIpcMainService<T, Q> {
   return new InterRendererIpcMainServiceImpl(
-    options,
+    options as unknown as IpcMainServiceOptions,
   ) as unknown as InterRendererIpcMainService<T, Q>;
 }

@@ -53,6 +53,25 @@ export type MainIpcSource = {
 
 export type IpcSource = MainIpcSource | RendererIpcSource;
 
+export type IpcBroadcastScopeDescriptor = {
+  readonly kind: string;
+};
+
+export type IpcBroadcastScope<S extends IpcBroadcastScopeDescriptor = never> =
+  | { readonly kind: 'all' }
+  | S;
+
+export type RendererEventDelivery<
+  S extends IpcBroadcastScopeDescriptor = never,
+> =
+  | {
+      readonly kind: 'direct';
+    }
+  | {
+      readonly kind: 'broadcast';
+      readonly scope: IpcBroadcastScope<S>;
+    };
+
 export type IpcContextBase<
   K extends 'request' | 'event',
   S extends IpcSource,
@@ -86,12 +105,12 @@ export type RendererRequestContext<C extends string = string> = IpcContextBase<
   C
 >;
 
-export type RendererEventContext<C extends string = string> = IpcContextBase<
-  'event',
-  RendererIpcSource,
-  IpcRendererEvent,
-  C
->;
+export type RendererEventContext<
+  C extends string = string,
+  S extends IpcBroadcastScopeDescriptor = never,
+> = IpcContextBase<'event', RendererIpcSource, IpcRendererEvent, C> & {
+  readonly delivery: RendererEventDelivery<S>;
+};
 
 export type RequestHandler<
   T extends IpcFunctionMapConstraint<T>,
@@ -138,6 +157,22 @@ export type RequestOptions<
    */
   timeout?: number;
 } & (Parameters<T[K]> extends [] ? { data?: [] } : { data: Parameters<T[K]> });
+
+export type BroadcastOptions<
+  T extends IpcFunctionMapConstraint<T>,
+  K extends keyof T,
+  S extends IpcBroadcastScopeDescriptor = never,
+> = Omit<RequestOptions<T, K>, 'timeout'> & {
+  scope?: IpcBroadcastScope<S>;
+};
+
+export type BroadcastArguments<
+  T extends IpcFunctionMapConstraint<T>,
+  K extends keyof T,
+  S extends IpcBroadcastScopeDescriptor = never,
+> = Parameters<T[K]> extends []
+  ? [options?: BroadcastOptions<T, K, S>]
+  : [options: BroadcastOptions<T, K, S>];
 
 /**
  * response data type for ipc service.

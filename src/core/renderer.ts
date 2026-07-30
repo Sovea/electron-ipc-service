@@ -18,12 +18,17 @@ import {
   unwrapResponse,
 } from '../protocol.js';
 import type {
+  BroadcastArguments,
   EmptyIpcEndpoint,
+  EmptyIpcMap,
   EventListener,
   Fn,
+  IpcBroadcastScopeDescriptor,
   IpcEndpointConstraint,
+  IpcFunctionMapConstraint,
   IpcServiceBaseOptions,
   RendererEventContext,
+  RendererEventDelivery,
   RendererRequestContext,
   RequestHandler,
   RequestOptions,
@@ -32,7 +37,9 @@ import type {
 import type {
   APIBetweenRenderers,
   InterRendererIpcRendererService,
+  IpcCommonChannelConflicts,
   IpcRendererId,
+  IpcSchemaConflictGuard,
   MultiRenderersSchema,
 } from '../types/renderer.js';
 import { withTimeout } from '../utils/fn.js';
@@ -46,6 +53,8 @@ export class IpcRendererService<
   H extends IpcEndpointConstraint<H> = EmptyIpcEndpoint,
   M extends IpcEndpointConstraint<M> = EmptyIpcEndpoint,
   Q extends Fn<never[], number | undefined> = Fn<never[], number | undefined>,
+  B extends IpcFunctionMapConstraint<B> = EmptyIpcMap,
+  S extends IpcBroadcastScopeDescriptor = never,
 > extends BaseIpcService {
   send<K extends keyof M['events'] & string>(
     channel: K,
@@ -121,6 +130,15 @@ export class IpcRendererService<
     this.sendMessage(ipcChannel, channel, channel, options);
   }
 
+  broadcast<K extends keyof B & string>(
+    channel: K,
+    ...[options]: BroadcastArguments<B, K, S>
+  ) {
+    this.assertActive();
+    const ipcChannel = this.wrapChannel(`${IpcChannelType.Internal}:broadcast`);
+    this.sendMessage(ipcChannel, channel, channel, options ?? {});
+  }
+
   handle<K extends keyof H['requests'] & string>(
     channel: K,
     listener: RequestHandler<H['requests'], K, RendererRequestContext<K>>,
@@ -165,7 +183,7 @@ export class IpcRendererService<
 
   receive<K extends keyof H['events'] & string>(
     channel: K,
-    listener: EventListener<H['events'], K, RendererEventContext<K>>,
+    listener: EventListener<H['events'], K, RendererEventContext<K, S>>,
   ): Unsubscribe {
     this.assertActive();
     const ipcChannel = this.eventChannel(channel);
@@ -178,7 +196,7 @@ export class IpcRendererService<
 
   receiveOnce<K extends keyof H['events'] & string>(
     channel: K,
-    listener: EventListener<H['events'], K, RendererEventContext<K>>,
+    listener: EventListener<H['events'], K, RendererEventContext<K, S>>,
   ): Unsubscribe {
     this.assertActive();
     const ipcChannel = this.eventChannel(channel);
@@ -295,7 +313,7 @@ export class IpcRendererService<
 
   private wrapEventListener<K extends keyof H['events'] & string>(
     channel: K,
-    listener: EventListener<H['events'], K, RendererEventContext<K>>,
+    listener: EventListener<H['events'], K, RendererEventContext<K, S>>,
     onReceive?: () => void,
   ) {
     return (event: IpcRendererEvent, data: unknown, metadata: unknown) => {
@@ -311,8 +329,9 @@ export class IpcRendererService<
         return;
       }
 
-      const context: RendererEventContext<K> = {
+      const context: RendererEventContext<K, S> = {
         channel,
+        delivery: this.getEventDelivery(metadata),
         event,
         kind: 'event',
         source: metadata.source,
@@ -392,8 +411,40 @@ export class IpcRendererService<
       'kind' in value &&
       value.kind === 'event' &&
       'source' in value &&
-      this.isRendererSource(value.source)
+      this.isRendererSource(value.source) &&
+      (!('delivery' in value) ||
+        value.delivery === undefined ||
+        this.isEventDelivery(value.delivery))
     );
+  }
+
+  private isEventDelivery(
+    value: unknown,
+  ): value is NonNullable<RoutedEventMetadata['delivery']> {
+    if (!value || typeof value !== 'object' || !('kind' in value)) {
+      return false;
+    }
+    if (value.kind === 'direct') {
+      return true;
+    }
+    if (
+      value.kind !== 'broadcast' ||
+      !('scope' in value) ||
+      !value.scope ||
+      typeof value.scope !== 'object' ||
+      !('kind' in value.scope)
+    ) {
+      return false;
+    }
+    return typeof value.scope.kind === 'string' && value.scope.kind.length > 0;
+  }
+
+  private getEventDelivery(
+    metadata: RoutedEventMetadata,
+  ): RendererEventDelivery<S> {
+    return (metadata.delivery ?? {
+      kind: 'direct',
+    }) as RendererEventDelivery<S>;
   }
 
   private isRequestSource(
@@ -438,16 +489,23 @@ export function create<T extends IpcEndpointConstraint<T>>(
 export function createForInterRenderers<
   T extends MultiRenderersSchema,
   Q extends Fn<never[], number | undefined>,
->(options?: IpcServiceBaseOptions) {
+  S extends IpcBroadcastScopeDescriptor = never,
+>(
+  ...args: [IpcCommonChannelConflicts<T>] extends [never]
+    ? [options?: IpcServiceBaseOptions]
+    : [options: IpcServiceBaseOptions & IpcSchemaConflictGuard<T>]
+) {
+  const options = args[0] as IpcServiceBaseOptions | undefined;
   const ipcRendererService = new IpcRendererService(options);
 
   const useIpcRendererService = <K extends IpcRendererId<T>>(
     _key: K,
-  ): InterRendererIpcRendererService<T, K, Q> => {
+  ): InterRendererIpcRendererService<T, K, Q, S> => {
     return ipcRendererService as unknown as InterRendererIpcRendererService<
       T,
       K,
-      Q
+      Q,
+      S
     >;
   };
 

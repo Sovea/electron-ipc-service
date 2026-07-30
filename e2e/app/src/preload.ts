@@ -2,9 +2,12 @@ import {
   create,
   createForInterRenderers,
   IpcRendererService,
+  type RendererEventDelivery,
 } from '@sovea/electron-ipc-service/renderer';
 import electron from 'electron';
 import type {
+  BroadcastScope,
+  BroadcastTargetOptions,
   DriverError,
   DriverEvent,
   E2EDriver,
@@ -52,7 +55,11 @@ const events: DriverEvent[] = [];
 const reportedErrors: DriverError[] = [];
 let rejectReportedErrors = false;
 const mainService = create<MainSchema>();
-const useService = createForInterRenderers<RendererSchema, GetWebContentsId>({
+const useService = createForInterRenderers<
+  RendererSchema,
+  GetWebContentsId,
+  BroadcastScope
+>({
   async onError(error) {
     reportedErrors.push(describeError(error));
     await Promise.resolve();
@@ -83,6 +90,15 @@ function recordHandle(
   });
 }
 
+function describeDelivery(delivery: RendererEventDelivery<BroadcastScope>) {
+  return delivery.kind === 'broadcast'
+    ? {
+        deliveryKind: delivery.kind,
+        scope: delivery.scope,
+      }
+    : {};
+}
+
 if (rendererId === 'main') {
   const service = services.main;
   service.handle('duplicate', (context, value) => {
@@ -102,6 +118,7 @@ if (rendererId === 'main') {
       kind: 'receive',
       channel: 'commonMessage',
       data: value,
+      ...describeDelivery(context.delivery),
       sourceId:
         context.source.kind === 'renderer'
           ? context.source.webContentsId
@@ -183,6 +200,7 @@ if (rendererId === 'sub') {
       kind: 'receive',
       channel: 'commonMessage',
       data: value,
+      ...describeDelivery(context.delivery),
       sourceId:
         context.source.kind === 'renderer'
           ? context.source.webContentsId
@@ -238,6 +256,7 @@ if (rendererId === 'other') {
       kind: 'receive',
       channel: 'commonMessage',
       data: value,
+      ...describeDelivery(context.delivery),
       sourceId:
         context.source.kind === 'renderer'
           ? context.source.webContentsId
@@ -255,6 +274,7 @@ type MainRuntimeService = {
 };
 
 type InterRendererRuntimeService = {
+  broadcast(channel: string, options: BroadcastTargetOptions): void;
   destroy(): void;
   handle(
     channel: string,
@@ -331,6 +351,9 @@ const driver: E2EDriver = {
   },
   sendTo(channel, options) {
     interRendererRuntimeService.sendTo(channel, options);
+  },
+  broadcast(channel, options) {
+    interRendererRuntimeService.broadcast(channel, options);
   },
   getEvents() {
     return [...events];

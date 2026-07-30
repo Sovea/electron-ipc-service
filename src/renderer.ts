@@ -14,9 +14,13 @@ export {
   IpcTimeoutError,
 } from './errors.js';
 export type {
+  BroadcastArguments,
+  BroadcastOptions,
   EmptyIpcEndpoint,
   EmptyIpcMap,
   EventListener,
+  IpcBroadcastScope,
+  IpcBroadcastScopeDescriptor,
   IpcContextBase,
   IpcEndpointConstraint,
   IpcEndpointSchema,
@@ -27,6 +31,7 @@ export type {
   MainIpcSource,
   MainRequestContext,
   RendererEventContext,
+  RendererEventDelivery,
   RendererIpcSource,
   RendererRequestContext,
   RequestHandler,

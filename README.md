@@ -107,6 +107,16 @@ type GetWebContentsId = (
   workspaceId: string,
 ) => number | undefined;
 
+type BroadcastScope =
+  | {
+      kind: 'workspace';
+      workspaceId: string;
+    }
+  | {
+      kind: 'project';
+      projectId: string;
+    };
+
 const getWebContentsId: GetWebContentsId = (
   rendererId,
   workspaceId,
@@ -165,9 +175,17 @@ import {
 
 const ipc = createForInterRenderers<
   RendererIpc,
-  GetWebContentsId
+  GetWebContentsId,
+  BroadcastScope
 >({
   getWebContentsId,
+  resolveBroadcastTargets: ({ source, channel, scope }) => {
+    // Validate the renderer-declared logical scope before resolving it.
+    if (scope.kind === 'all') {
+      return windowManager.getAllRendererWebContentsIds();
+    }
+    return windowManager.getRendererWebContentsIds(scope);
+  },
 });
 
 const settings = await ipc.invoke('readSettings', {
@@ -184,7 +202,8 @@ import {
 
 const getIpc = createForInterRenderers<
   RendererIpc,
-  GetWebContentsId
+  GetWebContentsId,
+  BroadcastScope
 >();
 
 const mainRendererIpc = getIpc('main');
@@ -194,6 +213,13 @@ const settings = await mainRendererIpc.invokeTo('readSettings', {
 mainRendererIpc.sendTo('themeChanged', {
   windowParams: ['settings', 'workspace'],
   data: ['dark'],
+});
+mainRendererIpc.broadcast('themeChanged', {
+  data: ['dark'],
+  scope: {
+    kind: 'workspace',
+    workspaceId: 'workspace',
+  },
 });
 
 const settingsIpc = getIpc('settings');
@@ -217,6 +243,17 @@ target:
 
 Renderer identifiers support both strings and numbers, including mixed unions
 such as `'main' | 1`.
+
+`broadcast()` accepts only `renderer.common.events`. It sends one message from
+the source renderer to Main; Main resolves the logical scope and fans the event
+out to a snapshot of live targets. The source renderer is always excluded,
+duplicate targets are delivered once, and a failed target does not block the
+others. Omitting `scope` means `{ kind: 'all' }`.
+
+Scope descriptors are application-defined, type-safe structured-clone values.
+Renderers declare routing intent, while Main remains responsible for validating
+that intent and mapping it to `webContentsId` values. Common request and event
+channel names cannot be redeclared by a specific renderer.
 
 ## Handler context
 
@@ -248,7 +285,20 @@ type MainIpcSource = {
 type RendererRequestSource =
   | MainIpcSource
   | RendererIpcSource;
+
+type RendererEventDelivery<BroadcastScope> =
+  | {
+      kind: 'direct';
+    }
+  | {
+      kind: 'broadcast';
+      scope: { kind: 'all' } | BroadcastScope;
+    };
 ```
+
+Renderer event listeners can discriminate `context.delivery.kind` to determine
+whether an event was sent directly or broadcast and inspect the effective
+broadcast scope.
 
 ## Errors and timeouts
 

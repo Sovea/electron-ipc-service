@@ -24,7 +24,17 @@ export interface RoutedEventMetadata {
   version: typeof IPC_PROTOCOL_VERSION;
   kind: 'event';
   source: RendererIpcSource;
+  delivery?: RoutedEventDelivery;
 }
+
+export type RoutedEventDelivery =
+  | {
+      kind: 'direct';
+    }
+  | {
+      kind: 'broadcast';
+      scope: unknown;
+    };
 
 export interface RoutedReplyMessage {
   version: typeof IPC_PROTOCOL_VERSION;

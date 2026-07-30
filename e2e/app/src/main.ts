@@ -9,6 +9,7 @@ import electron, {
   type IpcMainInvokeEvent,
 } from 'electron';
 import type {
+  BroadcastScope,
   DriverError,
   GetWebContentsId,
   RendererId,
@@ -50,6 +51,33 @@ function getWebContentsId(rendererId: RendererId, queryWorkspaceId: string) {
   return windows.get(rendererId)?.webContents.id;
 }
 
+function getRendererWebContentsIds() {
+  return [...windows.values()].map((window) => window.webContents.id);
+}
+
+function resolveBroadcastTargets(
+  scope: { kind: 'all' } | BroadcastScope,
+): Iterable<number> {
+  const allTargetIds = getRendererWebContentsIds();
+  if (scope.kind === 'all') {
+    return [...allTargetIds, ...allTargetIds];
+  }
+  if (scope.kind === 'workspace') {
+    return scope.workspaceId === workspaceId ? allTargetIds : [];
+  }
+  if (scope.kind === 'renderer') {
+    const targetId = windows.get(scope.rendererId)?.webContents.id;
+    return targetId === undefined ? [] : [targetId];
+  }
+  if (scope.kind === 'with-missing-target') {
+    return scope.workspaceId === workspaceId
+      ? [999_999, -1, ...allTargetIds]
+      : [];
+  }
+  scope satisfies never;
+  return [];
+}
+
 function installRemovableHandler() {
   removableDisposer = service?.handle('removableMain', (_context, value) => {
     return `handler-${removableGeneration}:${value}`;
@@ -57,10 +85,15 @@ function installRemovableHandler() {
 }
 
 function installService() {
-  service = createForInterRenderers<RendererSchema, GetWebContentsId>({
+  service = createForInterRenderers<
+    RendererSchema,
+    GetWebContentsId,
+    BroadcastScope
+  >({
     getWebContentsId,
     ipcChannelPrefix: channelPrefix,
     requestTimeout: 300,
+    resolveBroadcastTargets: ({ scope }) => resolveBroadcastTargets(scope),
   });
 
   mainEventDisposer = service.on('mainEvent', (_context, value) => {

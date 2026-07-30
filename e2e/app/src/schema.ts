@@ -73,12 +73,28 @@ export type GetWebContentsId = (
   workspaceId: string,
 ) => number | undefined;
 
+export type BroadcastScope =
+  | {
+      kind: 'workspace';
+      workspaceId: string;
+    }
+  | {
+      kind: 'renderer';
+      rendererId: RendererId;
+    }
+  | {
+      kind: 'with-missing-target';
+      workspaceId: string;
+    };
+
 export type DriverEvent = {
   kind: 'handle' | 'receive' | 'wire';
   channel: string;
   data?: unknown;
   sourceId?: number;
   sourceKind?: 'main' | 'renderer';
+  deliveryKind?: 'broadcast';
+  scope?: unknown;
 };
 
 export type DriverError = {
@@ -94,6 +110,11 @@ export type TargetOptions = {
   timeout?: number;
   webContentsId?: number;
   windowParams?: [RendererId, string];
+};
+
+export type BroadcastTargetOptions = {
+  data?: unknown[];
+  scope?: { kind: 'all' } | BroadcastScope;
 };
 
 export interface E2EDriver {
@@ -114,6 +135,7 @@ export interface E2EDriver {
   invokeToError(channel: string, options: TargetOptions): Promise<DriverError>;
   forgeReply(requestId: string, value: unknown): void;
   sendTo(channel: string, options: Omit<TargetOptions, 'timeout'>): void;
+  broadcast(channel: string, options: BroadcastTargetOptions): void;
   getEvents(): DriverEvent[];
   clearEvents(): void;
   control<T>(command: string, payload?: unknown): Promise<T>;

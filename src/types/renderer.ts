@@ -2,15 +2,20 @@ import type { UnionToIntersection } from 'type-fest';
 import type { IpcMainService, IpcMainServiceOptions } from '../core/main.js';
 import type { IpcRendererService } from '../core/renderer.js';
 import type {
+  BroadcastArguments,
   EmptyIpcEndpoint,
   EmptyIpcMap,
   EventListener,
   Fn,
+  IpcBroadcastScope,
+  IpcBroadcastScopeDescriptor,
   IpcEndpointConstraint,
   IpcEndpointSchema,
   IpcFunctionMapConstraint,
   NormalizedIpcEndpoint,
+  NormalizedIpcFunctionMap,
   RendererEventContext,
+  RendererIpcSource,
   RendererRequestContext,
   RequestHandler,
   RequestOptions,
@@ -18,7 +23,13 @@ import type {
 
 export type APIBetweenRenderers = keyof Pick<
   IpcRendererService,
-  'handle' | 'handleOnce' | 'receive' | 'receiveOnce' | 'invokeTo' | 'sendTo'
+  | 'broadcast'
+  | 'handle'
+  | 'handleOnce'
+  | 'receive'
+  | 'receiveOnce'
+  | 'invokeTo'
+  | 'sendTo'
 >;
 
 export type UnknownRequestOptions = {
@@ -36,7 +47,8 @@ export type IpcRendererRequestHandler<
 export type IpcRendererEventListener<
   T extends IpcFunctionMapConstraint<T>,
   K extends keyof T & string,
-> = EventListener<T, K, RendererEventContext<K>>;
+  S extends IpcBroadcastScopeDescriptor = never,
+> = EventListener<T, K, RendererEventContext<K, S>>;
 
 type IpcEndpointMapConstraint<T> = {
   [K in keyof T]: T[K] extends IpcEndpointSchema
@@ -133,6 +145,26 @@ type AllSpecificEndpoints<T extends MultiRenderersSchema> = Extract<
   IpcEndpointSchema
 >;
 
+type AllSpecificRequests<T extends MultiRenderersSchema> =
+  AllSpecificEndpoints<T>['requests'];
+
+type AllSpecificEvents<T extends MultiRenderersSchema> =
+  AllSpecificEndpoints<T>['events'];
+
+export type IpcCommonChannelConflicts<T extends MultiRenderersSchema> =
+  | (keyof T['renderer']['common']['requests'] &
+      keyof UnionToIntersection<AllSpecificRequests<T>>)
+  | (keyof T['renderer']['common']['events'] &
+      keyof UnionToIntersection<AllSpecificEvents<T>>);
+
+export type IpcSchemaConflictGuard<T extends MultiRenderersSchema> = [
+  IpcCommonChannelConflicts<T>,
+] extends [never]
+  ? unknown
+  : {
+      readonly __commonRendererChannelConflicts__: never;
+    };
+
 type OtherRequests<
   T extends MultiRenderersSchema,
   K extends IpcRendererId<T>,
@@ -187,7 +219,19 @@ export type IpcEventChannels<
 
 export type IpcMainRequestChannels<T extends MultiRenderersSchema> =
   | keyof T['renderer']['common']['requests']
-  | keyof UnionToIntersection<AllSpecificEndpoints<T>['requests']>;
+  | keyof UnionToIntersection<AllSpecificRequests<T>>;
+
+export type IpcBroadcastEvents<T extends MultiRenderersSchema> =
+  T['renderer']['common']['events'];
+
+export type IpcBroadcastTargetContext<
+  T extends MultiRenderersSchema,
+  S extends IpcBroadcastScopeDescriptor = never,
+> = {
+  readonly channel: keyof IpcBroadcastEvents<T> & string;
+  readonly scope: IpcBroadcastScope<S>;
+  readonly source: RendererIpcSource;
+};
 
 export type IpcInvokeToOptions<
   T extends MultiRenderersSchema,
@@ -226,10 +270,25 @@ export type IpcSendToUnknownOptions = UnknownSendOptions & {
 };
 
 export type InterRendererIpcMainServiceOptions<
+  T extends MultiRenderersSchema,
   Q extends Fn<never[], number | undefined>,
-> = Omit<IpcMainServiceOptions, 'getWebContentsId'> & {
+  S extends IpcBroadcastScopeDescriptor = never,
+> = Omit<
+  IpcMainServiceOptions,
+  'getWebContentsId' | 'resolveBroadcastTargets'
+> & {
   getWebContentsId: Q;
-};
+} & ([keyof IpcBroadcastEvents<T>] extends [never]
+    ? {
+        resolveBroadcastTargets?: (
+          context: IpcBroadcastTargetContext<T, S>,
+        ) => Iterable<number>;
+      }
+    : {
+        resolveBroadcastTargets: (
+          context: IpcBroadcastTargetContext<T, S>,
+        ) => Iterable<number>;
+      });
 
 export type InterRendererIpcMainService<
   T extends MultiRenderersSchema,
@@ -261,15 +320,27 @@ export type InterRendererIpcRendererService<
   T extends MultiRenderersSchema,
   K extends IpcRendererId<T>,
   Q extends Fn<never[], number | undefined>,
+  S extends IpcBroadcastScopeDescriptor = never,
 > = Omit<
   IpcRendererService<
     NormalizedIpcEndpoint<OutgoingRendererEndpoint<T, K>>,
     NormalizedIpcEndpoint<IpcRendererEndpoint<T, K>>,
     NormalizedIpcEndpoint<T['main']>,
-    Q
+    Q,
+    NormalizedIpcFunctionMap<IpcBroadcastEvents<T>>,
+    S
   >,
-  'invokeTo' | 'sendTo'
+  'broadcast' | 'invokeTo' | 'sendTo'
 > & {
+  broadcast<C extends keyof IpcBroadcastEvents<T> & string>(
+    channel: C,
+    ...options: BroadcastArguments<
+      NormalizedIpcFunctionMap<IpcBroadcastEvents<T>>,
+      C,
+      S
+    >
+  ): void;
+
   invokeTo<
     Target extends IpcTargetRendererId<T, K>,
     C extends keyof IpcRendererEndpoint<T, Target>['requests'] & string,

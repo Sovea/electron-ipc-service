@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import type {
+  BroadcastTargetOptions,
   DriverError,
   DriverEvent,
   E2EDriver,
@@ -85,6 +86,18 @@ export async function sendTo(
   await page.evaluate(
     ({ channel, options }) =>
       (window as DriverWindow).e2e.sendTo(channel, options),
+    { channel, options },
+  );
+}
+
+export async function broadcast(
+  page: Page,
+  channel: string,
+  options: BroadcastTargetOptions,
+) {
+  await page.evaluate(
+    ({ channel, options }) =>
+      (window as DriverWindow).e2e.broadcast(channel, options),
     { channel, options },
   );
 }

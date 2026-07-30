@@ -60,6 +60,7 @@ type Schema = MultiRenderersSchema<
     };
     events: {
       commonNotice: (value: string) => void;
+      refreshAll: () => void;
     };
   }
 >;
@@ -69,10 +70,37 @@ type GetWebContentsId = (
   workspaceId: string,
 ) => number | undefined;
 
+type BroadcastScope =
+  | {
+      kind: 'workspace';
+      workspaceId: string;
+    }
+  | {
+      kind: 'project';
+      projectId: number;
+    };
+
 const useIpcRendererService = createForInterRenderers<
   Schema,
-  GetWebContentsId
+  GetWebContentsId,
+  BroadcastScope
 >();
+const scopedMain = createMainForInterRenderers<
+  Schema,
+  GetWebContentsId,
+  BroadcastScope
+>({
+  getWebContentsId: (_rendererId, _workspaceId) => 1,
+  resolveBroadcastTargets(context) {
+    context.channel satisfies 'commonNotice' | 'refreshAll';
+    context.source.webContentsId satisfies number;
+    if (context.scope.kind === 'project') {
+      context.scope.projectId satisfies number;
+    }
+    return [];
+  },
+});
+void scopedMain;
 const mainService = useIpcRendererService('main');
 
 const subResult = mainService.invokeTo('getInfo', {
@@ -119,6 +147,55 @@ mainService.sendTo('otherNotice', {
 mainService.sendTo('commonNotice', {
   windowParams: ['sub', 'workspace'],
   data: ['value'],
+});
+mainService.broadcast('commonNotice', {
+  data: ['global'],
+});
+mainService.broadcast('refreshAll');
+mainService.broadcast('commonNotice', {
+  data: ['workspace'],
+  scope: {
+    kind: 'workspace',
+    workspaceId: 'workspace',
+  },
+});
+mainService.receive('commonNotice', (context, value) => {
+  value satisfies string;
+  if (context.delivery.kind === 'broadcast') {
+    if (context.delivery.scope.kind === 'workspace') {
+      context.delivery.scope.workspaceId satisfies string;
+    }
+  } else {
+    context.delivery satisfies { readonly kind: 'direct' };
+  }
+});
+
+// @ts-expect-error only common renderer events can be broadcast
+mainService.broadcast('subNotice', {
+  data: [1],
+});
+
+mainService.broadcast('commonNotice', {
+  // @ts-expect-error commonNotice requires a string payload
+  data: [1],
+});
+
+mainService.broadcast('commonNotice', {
+  data: ['workspace'],
+  scope: {
+    kind: 'workspace',
+    // @ts-expect-error workspaceId must be a string
+    workspaceId: 1,
+  },
+});
+
+mainService.broadcast('commonNotice', {
+  data: ['project'],
+  scope: {
+    kind: 'project',
+    // @ts-expect-error projectId must be a number
+    projectId: 'project',
+  },
 });
 
 const unknownResult = mainService.invokeTo('getInfo', {
@@ -298,3 +375,32 @@ export type TextMainResult = Expect<
 
 // @ts-expect-error renderer ids are limited to the declared string | number union
 useMixedRenderer(3);
+
+type ConflictingSchema = MultiRenderersSchema<
+  'only',
+  EmptyEndpoint,
+  {
+    only: {
+      requests: Record<never, never>;
+      events: {
+        duplicateCommon: (value: number) => void;
+      };
+    };
+  },
+  {
+    requests: Record<never, never>;
+    events: {
+      duplicateCommon: (value: string) => void;
+    };
+  }
+>;
+type GetConflictingWebContentsId = (rendererId: 'only') => number | undefined;
+
+// @ts-expect-error common channels cannot be redeclared by a specific renderer
+createForInterRenderers<ConflictingSchema, GetConflictingWebContentsId>();
+
+// @ts-expect-error main rejects the same common/specified channel conflict
+createMainForInterRenderers<ConflictingSchema, GetConflictingWebContentsId>({
+  getWebContentsId: () => 1,
+  resolveBroadcastTargets: () => [],
+});
