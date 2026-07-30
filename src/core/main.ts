@@ -19,17 +19,25 @@ import {
   type RoutedReplyMessage,
   type RoutedRequestMetadata,
   successResponse,
+  unwrapResponse,
 } from '../protocol.js';
 import type {
+  EmptyIpcEndpoint,
   EventListener,
   Fn,
   IpcEndpointConstraint,
   IpcServiceBaseOptions,
+  IpcSource,
   MainEventContext,
   MainRequestContext,
   RequestHandler,
   Unsubscribe,
 } from '../types/index.js';
+import type {
+  InterRendererIpcMainService,
+  InterRendererIpcMainServiceOptions,
+  MultiRenderersSchema,
+} from '../types/renderer.js';
 import { BaseIpcService } from './base.js';
 
 const { ipcMain, webContents } = electron;
@@ -89,7 +97,10 @@ export class IpcMainService<
       try {
         this.assertRouteInput(channel, options);
         return await this.dispatchRequest(
-          event.sender.id,
+          {
+            kind: 'renderer',
+            webContentsId: event.sender.id,
+          },
           channel,
           options as RoutedRequestOptions,
         );
@@ -186,8 +197,8 @@ export class IpcMainService<
     };
   }
 
-  private dispatchRequest(
-    sourceWebContentsId: number,
+  protected dispatchRequest(
+    source: IpcSource,
     channel: string,
     options: RoutedRequestOptions,
   ): Promise<IpcResponse> {
@@ -199,10 +210,7 @@ export class IpcMainService<
     const metadata: RoutedRequestMetadata = {
       kind: 'request',
       requestId,
-      source: {
-        kind: 'renderer',
-        webContentsId: sourceWebContentsId,
-      },
+      source,
       timeout,
       version: IPC_PROTOCOL_VERSION,
     };
@@ -262,6 +270,19 @@ export class IpcMainService<
         }
       }
     });
+  }
+
+  protected async invokeRenderer(
+    channel: string,
+    options: RoutedRequestOptions,
+  ): Promise<unknown> {
+    this.assertRouteInput(channel, options);
+    const response = await this.dispatchRequest(
+      { kind: 'main' },
+      channel,
+      options,
+    );
+    return unwrapResponse(response, { channel });
   }
 
   private trackTargetRequest(target: WebContents, requestId: string) {
@@ -614,4 +635,21 @@ export class IpcMainService<
     super.destroy();
     this.disposeInternalHandlers();
   }
+}
+
+class InterRendererIpcMainServiceImpl extends IpcMainService<EmptyIpcEndpoint> {
+  invoke(channel: string, options: RoutedRequestOptions): Promise<unknown> {
+    return this.invokeRenderer(channel, options);
+  }
+}
+
+export function createForInterRenderers<
+  T extends MultiRenderersSchema,
+  Q extends Fn<never[], number | undefined>,
+>(
+  options: InterRendererIpcMainServiceOptions<Q>,
+): InterRendererIpcMainService<T, Q> {
+  return new InterRendererIpcMainServiceImpl(
+    options,
+  ) as unknown as InterRendererIpcMainService<T, Q>;
 }

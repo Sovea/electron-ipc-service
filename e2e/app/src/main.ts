@@ -1,11 +1,20 @@
 import path from 'node:path';
-import { IpcMainService } from '@sovea/electron-ipc-service';
+import {
+  createForInterRenderers,
+  type InterRendererIpcMainService,
+} from '@sovea/electron-ipc-service';
 import electron, {
   type BrowserWindow as ElectronBrowserWindow,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
 } from 'electron';
-import type { MainSchema, RendererId } from './schema';
+import type {
+  DriverError,
+  GetWebContentsId,
+  RendererId,
+  RendererSchema,
+  TargetOptions,
+} from './schema';
 import { rendererIds } from './schema';
 
 const { app, BrowserWindow, ipcMain } = electron;
@@ -18,7 +27,9 @@ const windows = new Map<RendererId, ElectronBrowserWindow>();
 const readyRenderers = new Set<RendererId>();
 const mainEvents: Array<{ channel: string; value: string }> = [];
 
-let service: IpcMainService<MainSchema> | undefined;
+let service:
+  | InterRendererIpcMainService<RendererSchema, GetWebContentsId>
+  | undefined;
 let mainEventDisposer: (() => void) | undefined;
 let removableDisposer: (() => void) | undefined;
 let removableGeneration = 1;
@@ -46,7 +57,7 @@ function installRemovableHandler() {
 }
 
 function installService() {
-  service = new IpcMainService<MainSchema>({
+  service = createForInterRenderers<RendererSchema, GetWebContentsId>({
     getWebContentsId,
     ipcChannelPrefix: channelPrefix,
     requestTimeout: 300,
@@ -124,6 +135,43 @@ function assertRendererId(value: unknown): RendererId {
   throw new Error(`Unknown renderer id: ${String(value)}`);
 }
 
+type MainInvokePayload = {
+  channel: string;
+  options: TargetOptions;
+};
+
+type MainRuntimeService = {
+  invoke(channel: string, options: TargetOptions): Promise<unknown>;
+};
+
+function describeError(error: unknown): DriverError {
+  if (!(error instanceof Error)) {
+    return {
+      message: String(error),
+      name: 'Error',
+    };
+  }
+  const details = error as Error & {
+    code?: string;
+    remoteCode?: string;
+  };
+  return {
+    code: details.code,
+    message: details.message,
+    name: details.name,
+    remoteCode: details.remoteCode,
+  };
+}
+
+async function captureError(operation: () => Promise<unknown>) {
+  try {
+    await operation();
+  } catch (error) {
+    return describeError(error);
+  }
+  throw new Error('Expected IPC operation to fail');
+}
+
 async function handleControl(
   event: IpcMainInvokeEvent,
   command: string,
@@ -169,6 +217,25 @@ async function handleControl(
       return true;
     case 'window-id':
       return windows.get(assertRendererId(payload))?.webContents.id;
+    case 'invoke-renderer': {
+      const { channel, options } = payload as MainInvokePayload;
+      return (service as unknown as MainRuntimeService | undefined)?.invoke(
+        channel,
+        options,
+      );
+    }
+    case 'invoke-renderer-error': {
+      const { channel, options } = payload as MainInvokePayload;
+      return captureError(() => {
+        const currentService = service as unknown as
+          | MainRuntimeService
+          | undefined;
+        if (!currentService) {
+          throw new Error('Main IPC service is not available');
+        }
+        return currentService.invoke(channel, options);
+      });
+    }
     case 'close-self':
       BrowserWindow.fromWebContents(event.sender)?.close();
       return true;

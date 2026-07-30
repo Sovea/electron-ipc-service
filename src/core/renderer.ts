@@ -379,7 +379,7 @@ export class IpcRendererService<
       Number.isFinite(value.timeout) &&
       value.timeout >= 0 &&
       'source' in value &&
-      this.isSource(value.source)
+      this.isRequestSource(value.source)
     );
   }
 
@@ -392,11 +392,25 @@ export class IpcRendererService<
       'kind' in value &&
       value.kind === 'event' &&
       'source' in value &&
-      this.isSource(value.source)
+      this.isRendererSource(value.source)
     );
   }
 
-  private isSource(value: unknown): value is RoutedRequestMetadata['source'] {
+  private isRequestSource(
+    value: unknown,
+  ): value is RoutedRequestMetadata['source'] {
+    if (!value || typeof value !== 'object' || !('kind' in value)) {
+      return false;
+    }
+    if (value.kind === 'main') {
+      return true;
+    }
+    return this.isRendererSource(value);
+  }
+
+  private isRendererSource(
+    value: unknown,
+  ): value is RoutedEventMetadata['source'] {
     if (!value || typeof value !== 'object' || !('kind' in value)) {
       return false;
     }

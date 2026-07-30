@@ -1,4 +1,7 @@
 import {
+  createForInterRenderers as createMainForInterRenderers,
+  type InterRendererIpcMainService,
+  type InterRendererIpcMainServiceOptions,
   type IpcError,
   IpcErrorCode,
   type IpcErrorCode as IpcErrorCodeType,
@@ -157,6 +160,42 @@ type RendererSchema = MultiRenderersSchema<
 >;
 type GetWebContentsId = (rendererId: RendererId) => number | undefined;
 
+const mainInterRendererOptions = {
+  getWebContentsId: (_rendererId: RendererId) => 1,
+  requestTimeout: 500,
+} satisfies InterRendererIpcMainServiceOptions<GetWebContentsId>;
+
+const interRendererMainService = createMainForInterRenderers<
+  RendererSchema,
+  GetWebContentsId
+>(mainInterRendererOptions);
+const settingsResult = interRendererMainService.invoke('readSettings', {
+  windowParams: ['settings'],
+});
+settingsResult satisfies Promise<string>;
+
+const unknownSettingsResult = interRendererMainService.invoke('readSettings', {
+  webContentsId: 1,
+});
+unknownSettingsResult satisfies Promise<unknown>;
+
+// @ts-expect-error target-specific request payload is inferred from the target
+interRendererMainService.invoke('readSettings', {
+  windowParams: ['settings'],
+  data: ['unexpected'],
+});
+
+// @ts-expect-error unknown renderer request channel
+interRendererMainService.invoke('missing', {
+  webContentsId: 1,
+});
+
+type NamedMainService = InterRendererIpcMainService<
+  RendererSchema,
+  GetWebContentsId
+>;
+interRendererMainService satisfies NamedMainService;
+
 const getRendererService = createForInterRenderers<
   RendererSchema,
   GetWebContentsId
@@ -176,7 +215,11 @@ typedRendererService satisfies NamedService;
 const settingsService = getRendererService('settings');
 settingsService.handle('readSettings', (context) => {
   context.channel satisfies 'readSettings';
-  context.source.webContentsId satisfies number;
+  if (context.source.kind === 'renderer') {
+    context.source.webContentsId satisfies number;
+  } else {
+    context.source satisfies { readonly kind: 'main' };
+  }
   return 'settings';
 });
 

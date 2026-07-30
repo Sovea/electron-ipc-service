@@ -78,6 +78,7 @@ export type DriverEvent = {
   channel: string;
   data?: unknown;
   sourceId?: number;
+  sourceKind?: 'main' | 'renderer';
 };
 
 export type DriverError = {

@@ -1,3 +1,4 @@
+import { createForInterRenderers as createMainForInterRenderers } from '@sovea/electron-ipc-service';
 import {
   createForInterRenderers,
   type IpcRendererService,
@@ -254,6 +255,12 @@ const useMixedRenderer = createForInterRenderers<
   MixedRendererSchema,
   GetMixedWebContentsId
 >();
+const mixedMain = createMainForInterRenderers<
+  MixedRendererSchema,
+  GetMixedWebContentsId
+>({
+  getWebContentsId: (_rendererId, _workspaceId) => 1,
+});
 const stringRenderer = useMixedRenderer('main');
 const numericRenderer = useMixedRenderer(2);
 
@@ -265,12 +272,28 @@ export type NumericResult = Expect<
   Equal<typeof numericResult, Promise<number>>
 >;
 
+const numericMainResult = mixedMain.invoke('numericRequest', {
+  data: [2],
+  windowParams: [2, 'workspace'],
+});
+export type NumericMainResult = Expect<
+  Equal<typeof numericMainResult, Promise<number>>
+>;
+
 const textResult = numericRenderer.invokeTo('textRequest', {
   data: ['value'],
   windowParams: ['main', 'workspace'],
 });
 export type TextResult = Expect<
   Equal<typeof textResult, Promise<'text-result'>>
+>;
+
+const textMainResult = mixedMain.invoke('textRequest', {
+  data: ['value'],
+  windowParams: ['main', 'workspace'],
+});
+export type TextMainResult = Expect<
+  Equal<typeof textMainResult, Promise<'text-result'>>
 >;
 
 // @ts-expect-error renderer ids are limited to the declared string | number union

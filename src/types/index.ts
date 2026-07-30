@@ -81,7 +81,7 @@ export type MainEventContext<C extends string = string> = IpcContextBase<
 
 export type RendererRequestContext<C extends string = string> = IpcContextBase<
   'request',
-  RendererIpcSource,
+  IpcSource,
   IpcRendererEvent,
   C
 >;

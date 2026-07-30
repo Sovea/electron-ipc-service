@@ -67,34 +67,34 @@ const services = {
   other: useService('other'),
 };
 
-function recordHandle(channel: string, data: unknown, sourceId: number) {
-  events.push({ kind: 'handle', channel, data, sourceId });
+function recordHandle(
+  channel: string,
+  data: unknown,
+  source:
+    | { readonly kind: 'main' }
+    | { readonly kind: 'renderer'; readonly webContentsId: number },
+) {
+  events.push({
+    kind: 'handle',
+    channel,
+    data,
+    sourceId: source.kind === 'renderer' ? source.webContentsId : undefined,
+    sourceKind: source.kind,
+  });
 }
 
 if (rendererId === 'main') {
   const service = services.main;
   service.handle('duplicate', (context, value) => {
-    recordHandle(
-      'duplicate',
-      value,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('duplicate', value, context.source);
     return `main:${value}`;
   });
   service.handle('mainOnly', (context) => {
-    recordHandle(
-      'mainOnly',
-      undefined,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('mainOnly', undefined, context.source);
     return 'main-only';
   });
   service.handle('common', (context, value) => {
-    recordHandle(
-      'common',
-      value,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('common', value, context.source);
     return `main:${value}`;
   });
   service.receive('commonMessage', (context, value) => {
@@ -113,47 +113,27 @@ if (rendererId === 'main') {
 if (rendererId === 'sub') {
   const service = services.sub;
   service.handle('duplicate', (context, value) => {
-    recordHandle(
-      'duplicate',
-      value,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('duplicate', value, context.source);
     return value * 2;
   });
   service.handle('subOnly', (context, enabled) => {
-    recordHandle(
-      'subOnly',
-      enabled,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('subOnly', enabled, context.source);
     return !enabled;
   });
   service.handle('throwRenderer', (context, message) => {
-    recordHandle(
-      'throwRenderer',
-      message,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('throwRenderer', message, context.source);
     throw new Error(message);
   });
   service.handle('unserializable', (context) => {
-    recordHandle('unserializable', undefined, context.source.webContentsId);
+    recordHandle('unserializable', undefined, context.source);
     return () => 'not-cloneable';
   });
   service.handle('waitRenderer', (context) => {
-    recordHandle(
-      'waitRenderer',
-      undefined,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('waitRenderer', undefined, context.source);
     return new Promise<string>(() => {});
   });
   service.handle('outOfOrder', async (context, index, delay) => {
-    recordHandle(
-      'outOfOrder',
-      { delay, index },
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('outOfOrder', { delay, index }, context.source);
     await new Promise((resolve) => setTimeout(resolve, delay));
     return { index };
   });
@@ -195,11 +175,7 @@ if (rendererId === 'sub') {
   );
   unsubscribeMessage();
   service.handle('common', (context, value) => {
-    recordHandle(
-      'common',
-      value,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('common', value, context.source);
     return `sub:${value}`;
   });
   service.receive('commonMessage', (context, value) => {
@@ -246,27 +222,15 @@ if (rendererId === 'sub') {
 if (rendererId === 'other') {
   const service = services.other;
   service.handle('duplicate', (context, value) => {
-    recordHandle(
-      'duplicate',
-      value,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('duplicate', value, context.source);
     return !value;
   });
   service.handle('otherOnly', (context, name) => {
-    recordHandle(
-      'otherOnly',
-      name,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('otherOnly', name, context.source);
     return `other:${name}`;
   });
   service.handle('common', (context, value) => {
-    recordHandle(
-      'common',
-      value,
-      context.source.kind === 'renderer' ? context.source.webContentsId : 0,
-    );
+    recordHandle('common', value, context.source);
     return `other:${value}`;
   });
   service.receive('commonMessage', (context, value) => {

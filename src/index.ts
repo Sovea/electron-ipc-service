@@ -1,5 +1,8 @@
 export type { IpcMainServiceOptions } from './core/main.js';
-export { IpcMainService } from './core/main.js';
+export {
+  createForInterRenderers,
+  IpcMainService,
+} from './core/main.js';
 export type {
   IpcErrorOptions,
   SerializedIpcError,
@@ -30,3 +33,7 @@ export type {
   RequestOptions,
   Unsubscribe,
 } from './types/index.js';
+export type {
+  InterRendererIpcMainService,
+  InterRendererIpcMainServiceOptions,
+} from './types/renderer.js';

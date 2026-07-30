@@ -61,6 +61,79 @@ test('windowParams, webContentsId and common channels route correctly', async ({
   ).toBe(true);
 });
 
+test('main invokes target-specific and common renderer requests', async ({
+  electronHarness,
+}) => {
+  const main = electronHarness.page('main');
+  const sub = electronHarness.page('sub');
+  await clearEvents(sub);
+
+  await expect(
+    control(main, 'invoke-renderer', {
+      channel: 'subOnly',
+      options: {
+        data: [true],
+        windowParams: ['sub', electronHarness.workspaceId],
+      },
+    }),
+  ).resolves.toBe(false);
+  await expect(
+    control(main, 'invoke-renderer', {
+      channel: 'common',
+      options: {
+        data: ['from-main'],
+        windowParams: ['sub', electronHarness.workspaceId],
+      },
+    }),
+  ).resolves.toBe('sub:from-main');
+
+  await expect
+    .poll(() => getEvents(sub))
+    .toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channel: 'subOnly',
+          data: true,
+          kind: 'handle',
+          sourceKind: 'main',
+        }),
+        expect.objectContaining({
+          channel: 'common',
+          data: 'from-main',
+          kind: 'handle',
+          sourceKind: 'main',
+        }),
+      ]),
+    );
+
+  await expect(
+    control(main, 'invoke-renderer-error', {
+      channel: 'throwRenderer',
+      options: {
+        data: ['main-renderer-boom'],
+        windowParams: ['sub', electronHarness.workspaceId],
+      },
+    }),
+  ).resolves.toMatchObject({
+    code: 'IPC_REMOTE_ERROR',
+    message: 'main-renderer-boom',
+    name: 'IpcRemoteError',
+    remoteCode: 'IPC_REMOTE_ERROR',
+  });
+  await expect(
+    control(main, 'invoke-renderer-error', {
+      channel: 'duplicate',
+      options: {
+        data: [1],
+        windowParams: ['sub', 'missing-workspace'],
+      },
+    }),
+  ).resolves.toMatchObject({
+    code: 'IPC_TARGET_NOT_FOUND',
+    name: 'IpcError',
+  });
+});
+
 test('sendTo preserves payload and source metadata', async ({
   electronHarness,
 }) => {

@@ -4,7 +4,7 @@ import {
   IpcRemoteError,
   type SerializedIpcError,
 } from './errors.js';
-import type { RendererIpcSource } from './types/index.js';
+import type { IpcSource, RendererIpcSource } from './types/index.js';
 
 export const IPC_PROTOCOL_VERSION = 1;
 
@@ -16,7 +16,7 @@ export interface RoutedRequestMetadata {
   version: typeof IPC_PROTOCOL_VERSION;
   kind: 'request';
   requestId: string;
-  source: RendererIpcSource;
+  source: IpcSource;
   timeout: number;
 }
 

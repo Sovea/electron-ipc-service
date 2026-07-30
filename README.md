@@ -95,24 +95,28 @@ contextBridge.exposeInMainWorld('appApi', appApi);
 
 Do not expose the service or Electron's `ipcRenderer` directly to a page.
 
-## Renderer-to-renderer routing
+## Multi-renderer routing
 
-Configure the main service with an application-owned renderer resolver:
+Define an application-owned renderer resolver:
 
 ```typescript
 type RendererId = 'main' | 'settings';
 
-const ipc = new IpcMainService<MainIpc>({
-  getWebContentsId: (rendererId: RendererId, workspaceId: string) =>
-    windowManager.getWebContentsId(rendererId, workspaceId),
-});
+type GetWebContentsId = (
+  rendererId: RendererId,
+  workspaceId: string,
+) => number | undefined;
+
+const getWebContentsId: GetWebContentsId = (
+  rendererId,
+  workspaceId,
+) => windowManager.getWebContentsId(rendererId, workspaceId);
 ```
 
 Describe request and event channels for each renderer:
 
 ```typescript
 import {
-  createForInterRenderers,
   type MultiRenderersSchema,
 } from '@sovea/electron-ipc-service/renderer';
 
@@ -149,17 +153,45 @@ type GetWebContentsId = (
   rendererId: RendererId,
   workspaceId: string,
 ) => number | undefined;
+```
+
+In the main process, create the typed router from the complete schema. Main uses
+`invoke()` because its outbound direction is unambiguously a renderer:
+
+```typescript
+import {
+  createForInterRenderers,
+} from '@sovea/electron-ipc-service';
+
+const ipc = createForInterRenderers<
+  RendererIpc,
+  GetWebContentsId
+>({
+  getWebContentsId,
+});
+
+const settings = await ipc.invoke('readSettings', {
+  windowParams: ['settings', 'workspace'],
+});
+```
+
+In each trusted renderer preload, select the current logical renderer:
+
+```typescript
+import {
+  createForInterRenderers,
+} from '@sovea/electron-ipc-service/renderer';
 
 const getIpc = createForInterRenderers<
   RendererIpc,
   GetWebContentsId
 >();
 
-const mainIpc = getIpc('main');
-const settings = await mainIpc.invokeTo('readSettings', {
+const mainRendererIpc = getIpc('main');
+const settings = await mainRendererIpc.invokeTo('readSettings', {
   windowParams: ['settings', 'workspace'],
 });
-mainIpc.sendTo('themeChanged', {
+mainRendererIpc.sendTo('themeChanged', {
   windowParams: ['settings', 'workspace'],
   data: ['dark'],
 });
@@ -168,13 +200,16 @@ const settingsIpc = getIpc('settings');
 const removeHandler = settingsIpc.handle(
   'readSettings',
   (context) => {
-    console.log(context.source.webContentsId);
+    if (context.source.kind === 'renderer') {
+      console.log(context.source.webContentsId);
+    }
     return JSON.stringify({ theme: 'system' });
   },
 );
 ```
 
-`invokeTo()` and `sendTo()` require exactly one target:
+Main `invoke()` and renderer `invokeTo()` / `sendTo()` require exactly one
+target:
 
 - `windowParams` uses `getWebContentsId` and preserves target-specific types.
 - `webContentsId` routes directly, so payload and result types are intentionally
@@ -194,15 +229,25 @@ Contexts remain precise for their process and message kind:
 - `RendererEventContext`
 
 The public context contains only the channel, source and native Electron event.
-Its channel retains the registered string literal, and current Main and
-Renderer handlers both receive a precise renderer source. Internal request IDs,
-timeout timers and response envelopes are not exposed.
+Its channel retains the registered string literal. Main handlers and renderer
+event listeners receive a renderer source. Renderer request handlers may be
+invoked by either Main or another renderer, so they receive a discriminated
+source union. Internal request IDs, timeout timers and response envelopes are
+not exposed.
 
 ```typescript
 type RendererIpcSource = {
   kind: 'renderer';
   webContentsId: number;
 };
+
+type MainIpcSource = {
+  kind: 'main';
+};
+
+type RendererRequestSource =
+  | MainIpcSource
+  | RendererIpcSource;
 ```
 
 ## Errors and timeouts

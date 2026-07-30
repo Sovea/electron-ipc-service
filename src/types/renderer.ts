@@ -1,4 +1,5 @@
 import type { UnionToIntersection } from 'type-fest';
+import type { IpcMainService, IpcMainServiceOptions } from '../core/main.js';
 import type { IpcRendererService } from '../core/renderer.js';
 import type {
   EmptyIpcEndpoint,
@@ -127,6 +128,11 @@ type OtherSpecificEndpoints<
   IpcEndpointSchema
 >;
 
+type AllSpecificEndpoints<T extends MultiRenderersSchema> = Extract<
+  T['renderer']['specified'][keyof T['renderer']['specified']],
+  IpcEndpointSchema
+>;
+
 type OtherRequests<
   T extends MultiRenderersSchema,
   K extends IpcRendererId<T>,
@@ -179,6 +185,10 @@ export type IpcEventChannels<
   | keyof T['renderer']['common']['events']
   | keyof UnionToIntersection<OtherEvents<T, K>>;
 
+export type IpcMainRequestChannels<T extends MultiRenderersSchema> =
+  | keyof T['renderer']['common']['requests']
+  | keyof UnionToIntersection<AllSpecificEndpoints<T>['requests']>;
+
 export type IpcInvokeToOptions<
   T extends MultiRenderersSchema,
   Q extends Fn<never[], number | undefined>,
@@ -199,7 +209,7 @@ export type IpcSendToOptions<
   windowParams: IpcWindowParams<T, Q, K>;
 };
 
-type IpcRendererRequest<
+export type IpcRendererRequest<
   T extends MultiRenderersSchema,
   K extends IpcRendererId<T>,
   C extends keyof IpcRendererEndpoint<T, K>['requests'],
@@ -213,6 +223,30 @@ export type IpcInvokeToUnknownOptions = UnknownRequestOptions & {
 export type IpcSendToUnknownOptions = UnknownSendOptions & {
   webContentsId: number;
   windowParams?: never;
+};
+
+export type InterRendererIpcMainServiceOptions<
+  Q extends Fn<never[], number | undefined>,
+> = Omit<IpcMainServiceOptions, 'getWebContentsId'> & {
+  getWebContentsId: Q;
+};
+
+export type InterRendererIpcMainService<
+  T extends MultiRenderersSchema,
+  Q extends Fn<never[], number | undefined>,
+> = IpcMainService<NormalizedIpcEndpoint<T['main']>> & {
+  invoke<
+    Target extends IpcRendererId<T>,
+    C extends keyof IpcRendererEndpoint<T, Target>['requests'] & string,
+  >(
+    channel: C,
+    options: IpcInvokeToOptions<T, Q, Target, C>,
+  ): Promise<Awaited<ReturnType<IpcRendererRequest<T, Target, C>>>>;
+
+  invoke<C extends IpcMainRequestChannels<T> & string>(
+    channel: C,
+    options: IpcInvokeToUnknownOptions,
+  ): Promise<unknown>;
 };
 
 type OutgoingRendererEndpoint<
